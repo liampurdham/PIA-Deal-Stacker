@@ -7,7 +7,19 @@ from pathlib import Path
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
+
 st.set_page_config(layout="wide")
+
+
+# ============================
+# CONFIG — DATA SOURCE
+# ============================
+
+# OPTION 1 (RECOMMENDED): GitHub RAW URL
+DATA_URL = "https://raw.githubusercontent.com/liampurdham/PIA-Deal-Stacker/main/pp-complete.csv"
+
+# OPTION 2: Local fallback (for dev)
+LOCAL_FILE = "pp-complete.csv"
 
 
 # ============================
@@ -24,41 +36,50 @@ st.title("🏠 Carlisle Property Investment OS")
 
 
 # ============================
-# DATA LOAD (CLEANED)
+# DATA LOADER (CLOUD SAFE)
 # ============================
 @st.cache_data
 def load_data():
-    from pathlib import Path
 
-    # Always look in SAME folder as App.py
-    base_dir = Path(__file__).resolve().parent
-    file_path = base_dir / "pp-complete.csv"
+    df = None
 
-    st.write("Looking here:", file_path)
+    # ---- TRY CLOUD FIRST ----
+    try:
+        df = pd.read_csv(DATA_URL)
+        st.sidebar.success("Loaded dataset from GitHub")
+    except Exception:
+        st.sidebar.warning("GitHub load failed — trying local file")
 
-    if not file_path.exists():
-        st.error("❌ CSV NOT FOUND")
-        st.write("Make sure pp-complete.csv is in same folder as App.py")
-        return None
+        # ---- FALLBACK LOCAL ----
+        base_dir = Path(__file__).resolve().parent
+        file_path = base_dir / LOCAL_FILE
 
-    df = pd.read_csv(
-        file_path,
-        names=[
-            "id","price","date","postcode","type","new","tenure",
-            "paon","saon","street","locality","town","district","county",
-            "category","status"
-        ],
-        low_memory=False,
-        usecols=[1,3,9,11]
-    )
+        if file_path.exists():
+            df = pd.read_csv(file_path)
+        else:
+            st.error("❌ No dataset found (GitHub or local)")
+            return None
 
-    df.columns = ["price","postcode","street","district"]
+    # ----------------------------
+    # NORMALISE COLUMNS
+    # ----------------------------
+    df.columns = [
+        "id","price","date","postcode","type","new","tenure",
+        "paon","saon","street","locality","town","district","county",
+        "category","status"
+    ]
+
+    df = df[["price", "postcode", "street", "district"]]
 
     df["price"] = pd.to_numeric(df["price"], errors="coerce")
     df["postcode"] = df["postcode"].astype(str).str.lower()
-    df["street"] = df["street"].astype(str).str.lower()
     df["district"] = df["district"].astype(str).str.lower()
 
+    # CLEAN STREET
+    df["street"] = df["street"].fillna("Unknown Street")
+    df["street"] = df["street"].astype(str).str.title()
+
+    # FILTER CARLISLE
     df = df[df["district"].str.contains("carlisle", na=False)]
 
     return df
@@ -67,7 +88,8 @@ def load_data():
 land_data = load_data()
 
 if land_data is None:
-    st.warning("⚠️ Running without Land Registry data")
+    st.stop()
+
 
 # ============================
 # SCRAPER
@@ -188,43 +210,6 @@ def analyse(price, sqm, ppsqm):
 
 
 # ============================
-# INVESTOR PACK
-# ============================
-def generate_investor_pack(data, result, refurb, comps):
-
-    file_path = "investor_pack.pdf"
-    doc = SimpleDocTemplate(file_path)
-    styles = getSampleStyleSheet()
-
-    content = []
-
-    content.append(Paragraph("INVESTOR DEAL PACK", styles["Title"]))
-    content.append(Spacer(1, 12))
-
-    content.append(Paragraph(f"Property: {data['name']}", styles["Normal"]))
-    content.append(Paragraph(f"Price: £{data['price']}", styles["Normal"]))
-
-    content.append(Paragraph("RETURNS", styles["Heading2"]))
-    content.append(Paragraph(f"GDV: £{result['gdv']}", styles["Normal"]))
-    content.append(Paragraph(f"ROI: {result['roi']}%", styles["Normal"]))
-
-    content.append(Paragraph("REFURB", styles["Heading2"]))
-    content.append(Paragraph(f"Total Refurb: £{refurb['total']}", styles["Normal"]))
-
-    content.append(Paragraph("COMPARABLES", styles["Heading2"]))
-
-    if comps is not None:
-        for _, r in comps.head(5).iterrows():
-            content.append(
-                Paragraph(f"{r['street']} - £{int(r['price'])}", styles["Normal"])
-            )
-
-    doc.build(content)
-
-    return file_path
-
-
-# ============================
 # SESSION STATE
 # ============================
 if "analysis_done" not in st.session_state:
@@ -300,7 +285,7 @@ if page == "Analyse Deal":
 
 
 # ============================
-# FULL DEAL DASHBOARD
+# DASHBOARD
 # ============================
 if st.session_state.analysis_done:
 
@@ -314,9 +299,7 @@ if st.session_state.analysis_done:
 
     # PROPERTY
     st.subheader("🏠 Property Under Review")
-    link = zoopla_link(data["name"], None)
     st.markdown(f"**{data['name']}**")
-    st.markdown(f"🔗 [View Property]({link})")
 
     # CONDITION
     st.subheader("🏚 Condition")
@@ -344,30 +327,3 @@ if st.session_state.analysis_done:
                 ---
                 """
             )
-
-
-# ============================
-# INVESTOR PACK
-# ============================
-if st.session_state.analysis_done:
-
-    st.divider()
-    st.subheader("📄 Investor Pack")
-
-    if st.button("Generate Investor Pack"):
-
-        file = generate_investor_pack(
-            st.session_state.data,
-            st.session_state.result,
-            st.session_state.refurb,
-            st.session_state.comps
-        )
-
-        with open(file, "rb") as f:
-            st.download_button(
-                "Download Investor Pack",
-                f,
-                file_name="investor_pack.pdf"
-            )
-
-        st.success("Investor Pack Generated")
