@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+from pathlib import Path
 import re
 
 import pandas as pd
@@ -20,6 +22,7 @@ DEAL_TEMPLATE_URL = (
     "https://raw.githubusercontent.com/liampurdham/PIA-Deal-Stacker/main/"
     "Deal%20Stacking%20Template%20-%20PIA.xlsx"
 )
+EPC_API_BASE_URL = "https://api.get-energy-performance-data.communities.gov.uk"
 
 
 # ============================
@@ -36,7 +39,7 @@ page = st.sidebar.selectbox(
     ],
 )
 
-st.title("Property Investment Acadmey AI Assistant")
+st.title("Carlisle Property Investment OS")
 
 
 # ============================
@@ -44,6 +47,10 @@ st.title("Property Investment Acadmey AI Assistant")
 # ============================
 def format_money(value):
     return f"GBP {value:,.0f}"
+
+
+def format_money_per_sqm(value):
+    return f"GBP {value:,.0f} / sqm"
 
 
 def format_percent(value):
@@ -134,6 +141,104 @@ def render_calculator_styles():
     )
 
 
+def normalize_postcode(postcode):
+    cleaned = re.sub(r"\s+", "", str(postcode or "")).upper()
+    if len(cleaned) <= 3:
+        return cleaned
+    return f"{cleaned[:-3]} {cleaned[-3:]}"
+
+
+def postcode_sector_key(postcode):
+    cleaned = re.sub(r"\s+", "", str(postcode or "")).upper()
+    return cleaned[:4]
+
+
+def normalize_address_text(value):
+    text = str(value or "").lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def build_epc_address(record):
+    parts = [
+        record.get("addressLine1") or record.get("address_line_1"),
+        record.get("addressLine2") or record.get("address_line_2"),
+        record.get("addressLine3") or record.get("address_line_3"),
+        record.get("addressLine4") or record.get("address_line_4"),
+    ]
+    return ", ".join([part for part in parts if part])
+
+
+def get_epc_bearer_token(override_token=""):
+    if override_token:
+        return override_token.strip()
+
+    token = os.getenv("EPC_BEARER_TOKEN", "").strip()
+    if token:
+        return token
+
+    try:
+        token = str(st.secrets.get("EPC_BEARER_TOKEN", "")).strip()
+        if token:
+            return token
+    except Exception:
+        pass
+
+    try:
+        token = str(st.secrets.get("epc_bearer_token", "")).strip()
+        if token:
+            return token
+    except Exception:
+        pass
+
+    return ""
+
+
+def parse_registration_date(record):
+    return (
+        record.get("registrationDate")
+        or record.get("registration_date")
+        or record.get("lodgementDate")
+        or record.get("lodgement_date")
+        or ""
+    )
+
+
+def score_epc_candidate(record, street, postcode):
+    address_text = normalize_address_text(build_epc_address(record))
+    street_text = normalize_address_text(street)
+    postcode_text = normalize_postcode(postcode)
+    record_postcode = normalize_postcode(record.get("postcode"))
+
+    score = 0
+    if postcode_text and postcode_text == record_postcode:
+        score += 30
+
+    if street_text and street_text in address_text:
+        score += 60
+    elif street_text:
+        street_tokens = set(street_text.split())
+        address_tokens = set(address_text.split())
+        score += len(street_tokens & address_tokens) * 8
+
+    return score
+
+
+def choose_best_epc_candidate(records, street, postcode):
+    if not records:
+        return None
+
+    ranked = sorted(
+        records,
+        key=lambda record: (
+            score_epc_candidate(record, street, postcode),
+            parse_registration_date(record),
+        ),
+        reverse=True,
+    )
+    return ranked[0]
+
+
 # ============================
 # DATA LOADERS
 # ============================
@@ -204,6 +309,141 @@ def load_calculator_template_bytes():
 
 
 # ============================
+# EPC API
+# ============================
+@st.cache_data(show_spinner=False)
+def search_epc_certificates(postcode, address, bearer_token):
+    if not bearer_token:
+        return {"status": "missing_token", "records": []}
+
+    params = {
+        "postcode": normalize_postcode(postcode),
+        "current_page": 1,
+        "page_size": 200,
+    }
+    if address:
+        params["address"] = address
+
+    response = requests.get(
+        f"{EPC_API_BASE_URL}/api/domestic/search",
+        headers={
+            "Authorization": f"Bearer {bearer_token}",
+            "Accept": "application/json",
+        },
+        params=params,
+        timeout=20,
+    )
+
+    if response.status_code == 404:
+        return {"status": "not_found", "records": []}
+    if response.status_code in (401, 403):
+        return {"status": "auth_error", "records": []}
+
+    response.raise_for_status()
+    payload = response.json()
+    return {
+        "status": "ok",
+        "records": payload.get("data", []),
+        "pagination": payload.get("pagination", {}),
+    }
+
+
+@st.cache_data(show_spinner=False)
+def fetch_epc_certificate(certificate_number, bearer_token):
+    if not bearer_token or not certificate_number:
+        return {"status": "missing_token", "record": {}}
+
+    response = requests.get(
+        f"{EPC_API_BASE_URL}/api/certificate",
+        headers={
+            "Authorization": f"Bearer {bearer_token}",
+            "Accept": "application/json",
+        },
+        params={"certificate_number": certificate_number},
+        timeout=20,
+    )
+
+    if response.status_code == 404:
+        return {"status": "not_found", "record": {}}
+    if response.status_code in (401, 403):
+        return {"status": "auth_error", "record": {}}
+
+    response.raise_for_status()
+    payload = response.json()
+    return {"status": "ok", "record": payload.get("data", {})}
+
+
+def extract_total_floor_area(record):
+    for key in ("total_floor_area", "totalFloorArea", "floorArea", "floor_area"):
+        value = record.get(key)
+        if value not in (None, ""):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def enrich_comparables_with_epc(comps_df, bearer_token):
+    if comps_df is None or comps_df.empty:
+        return pd.DataFrame(), "no_comps"
+
+    rows = []
+    api_status = "ok" if bearer_token else "missing_token"
+
+    for _, row in comps_df.iterrows():
+        comp = row.to_dict()
+        match_status = "no_match"
+        floor_area = None
+        epc_rating = None
+        epc_address = None
+        certificate_number = None
+
+        if bearer_token:
+            search_result = search_epc_certificates(comp["postcode"], comp["street"], bearer_token)
+            status = search_result.get("status", "not_found")
+            if status == "ok" and not search_result.get("records"):
+                search_result = search_epc_certificates(comp["postcode"], "", bearer_token)
+                status = search_result.get("status", "not_found")
+
+            if status in ("auth_error", "missing_token"):
+                api_status = status
+                match_status = status
+            if status == "ok":
+                candidate = choose_best_epc_candidate(search_result.get("records", []), comp["street"], comp["postcode"])
+                if candidate:
+                    certificate_number = candidate.get("certificateNumber") or candidate.get("certificate_number")
+                    epc_address = build_epc_address(candidate)
+                    epc_rating = candidate.get("currentEnergyEfficiencyBand") or candidate.get("current_energy_efficiency_band")
+                    certificate_result = fetch_epc_certificate(certificate_number, bearer_token)
+                    if certificate_result.get("status") == "ok":
+                        certificate = certificate_result.get("record", {})
+                        floor_area = extract_total_floor_area(certificate)
+                        epc_rating = epc_rating or certificate.get("current_energy_efficiency_band")
+                        epc_address = epc_address or build_epc_address(certificate)
+                        match_status = "matched" if floor_area else "missing_floor_area"
+                    else:
+                        match_status = certificate_result.get("status", "certificate_error")
+
+        rows.append(
+            {
+                "street": comp["street"],
+                "postcode": normalize_postcode(comp["postcode"]),
+                "price": comp["price"],
+                "floor_area_sqm": floor_area,
+                "price_per_sqm": (comp["price"] / floor_area) if floor_area else None,
+                "epc_rating": epc_rating,
+                "epc_address": epc_address,
+                "certificate_number": certificate_number,
+                "epc_status": match_status if bearer_token else "missing_token",
+            }
+        )
+
+    enriched_df = pd.DataFrame(rows)
+    return enriched_df.sort_values(["price_per_sqm", "price"], ascending=[False, False], na_position="last"), api_status
+
+
+# ============================
 # SCRAPER
 # ============================
 def get_html(url):
@@ -263,19 +503,29 @@ def zoopla_link(street, postcode):
 # ============================
 # COMPARABLES
 # ============================
-def find_comps(postcode, data):
+def find_comps(postcode, data, limit=10):
     if data is None:
         return pd.DataFrame(columns=["price", "postcode", "street", "district"])
 
     comps_df = data.copy()
+    normalized_postcode = normalize_postcode(postcode)
+    sector_key = postcode_sector_key(postcode)
 
-    if postcode:
-        comps_df = comps_df[comps_df["postcode"].str.contains(postcode[:4], na=False)]
+    if normalized_postcode:
+        comps_df["normalized_postcode"] = comps_df["postcode"].apply(normalize_postcode)
+        comps_df["sector_key"] = comps_df["postcode"].apply(postcode_sector_key)
+        comps_df["match_score"] = 0
+        comps_df.loc[comps_df["sector_key"] == sector_key, "match_score"] += 2
+        comps_df.loc[comps_df["normalized_postcode"] == normalized_postcode, "match_score"] += 3
+        comps_df = comps_df[comps_df["match_score"] > 0]
 
     comps_df = comps_df.dropna(subset=["price"])
-    comps_df = comps_df.sort_values("price").head(10)
+    if "match_score" in comps_df.columns:
+        comps_df = comps_df.sort_values(["match_score", "price"], ascending=[False, True])
+    else:
+        comps_df = comps_df.sort_values("price")
 
-    return comps_df
+    return comps_df.head(limit).drop(columns=["normalized_postcode", "sector_key", "match_score"], errors="ignore")
 
 
 # ============================
@@ -837,12 +1087,33 @@ def render_flip_calculator():
 if "analysis_done" not in st.session_state:
     st.session_state.analysis_done = False
 
+if "area_intelligence_result" not in st.session_state:
+    st.session_state.area_intelligence_result = None
+
 
 # ============================
 # CALCULATOR PAGE
 # ============================
 def render_calculator_page():
     render_calculator_styles()
+
+    st.markdown(
+        """
+        <div class="calc-hero">
+            <h3>Deal Calculator</h3>
+            <p>Use the same BRR and Flip logic from your deal stacker, but as a guided app with live metrics instead of spreadsheet cells.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="calc-note">
+            Tweak leverage, timing, fees, refurb spend, and exit assumptions. The numbers update instantly so users can pressure-test a deal without touching a workbook.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     brr_tab, flip_tab = st.tabs(["BRR Strategy", "Flip Strategy"])
 
@@ -864,6 +1135,134 @@ def render_calculator_page():
             )
         else:
             st.write("No workbook file is needed for the app-style calculator, but you can still add the template to the repo later if you want it downloadable.")
+
+
+def render_area_intelligence_page():
+    st.subheader("Area Intelligence")
+
+    selected_postcode = normalize_postcode(st.session_state.get("selected_postcode", ""))
+    selected_name = ""
+    if st.session_state.get("analysis_done") and st.session_state.get("data"):
+        selected_name = st.session_state["data"].get("name", "")
+
+    if selected_name:
+        st.caption(f"Using the selected property from your deal analysis: {selected_name}")
+    else:
+        st.caption("Analyse a property first, or enter a postcode below to pull local EPC-backed comparables.")
+
+    with st.form("area_intelligence_form"):
+        input_col, settings_col = st.columns([2, 1])
+
+        with input_col:
+            postcode = st.text_input("Subject postcode", value=selected_postcode, placeholder="CA1 2AB")
+            manual_token = st.text_input(
+                "EPC bearer token (optional override)",
+                type="password",
+                help="Leave blank if you already store EPC_BEARER_TOKEN in Streamlit secrets or an environment variable.",
+            )
+
+        with settings_col:
+            max_comps = st.slider("Comparable sample size", min_value=3, max_value=15, value=8, step=1)
+            submitted = st.form_submit_button("Run Area Intelligence", use_container_width=True)
+
+    if submitted:
+        normalized_postcode = normalize_postcode(postcode)
+        if not normalized_postcode:
+            st.error("Add a postcode first.")
+        else:
+            land_data = load_data()
+            comps = find_comps(normalized_postcode, land_data, limit=max_comps)
+            token = get_epc_bearer_token(manual_token)
+            enriched_df, api_status = enrich_comparables_with_epc(comps, token)
+            st.session_state.area_intelligence_result = {
+                "postcode": normalized_postcode,
+                "sample_size": max_comps,
+                "api_status": api_status,
+                "has_token": bool(token),
+                "table": enriched_df,
+            }
+
+    result = st.session_state.get("area_intelligence_result")
+    if not result:
+        st.info("Run the postcode search to build local price-per-sqm intelligence.")
+        return
+
+    result_df = result["table"]
+    matched_df = result_df.dropna(subset=["floor_area_sqm", "price_per_sqm"]) if not result_df.empty else pd.DataFrame()
+
+    st.markdown(f"**Postcode focus:** {result['postcode']}")
+    sector_key = postcode_sector_key(result["postcode"])
+    if sector_key:
+        st.caption(f"Comparable selection is prioritised around the postcode sector `{sector_key}`.")
+
+    if result["api_status"] == "missing_token":
+        st.warning(
+            "EPC enrichment is switched off because no bearer token is configured. "
+            "Add `EPC_BEARER_TOKEN` to Streamlit secrets or paste a temporary token above."
+        )
+    elif result["api_status"] == "auth_error":
+        st.error(
+            "The EPC API token was rejected. Check the bearer token from the government's new energy data service."
+        )
+
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    metric_col1.metric("Comparables found", str(len(result_df)))
+    metric_col2.metric("EPC floor areas matched", str(len(matched_df)))
+    metric_col3.metric(
+        "Median price per sqm",
+        format_money_per_sqm(matched_df["price_per_sqm"].median()) if not matched_df.empty else "N/A",
+    )
+
+    if not matched_df.empty:
+        detail_col1, detail_col2, detail_col3 = st.columns(3)
+        detail_col1.metric("Average floor area", f"{matched_df['floor_area_sqm'].mean():,.1f} sqm")
+        detail_col2.metric("Average price per sqm", format_money_per_sqm(matched_df["price_per_sqm"].mean()))
+        detail_col3.metric("Highest price per sqm", format_money_per_sqm(matched_df["price_per_sqm"].max()))
+
+    if result_df.empty:
+        st.info("No comparable sales were found in your local dataset for that postcode sector.")
+        return
+
+    display_df = result_df.copy()
+    if "price" in display_df.columns:
+        display_df["price"] = display_df["price"].apply(lambda value: format_money(value) if pd.notna(value) else "N/A")
+    if "floor_area_sqm" in display_df.columns:
+        display_df["floor_area_sqm"] = display_df["floor_area_sqm"].apply(
+            lambda value: f"{value:,.1f}" if pd.notna(value) else "N/A"
+        )
+    if "price_per_sqm" in display_df.columns:
+        display_df["price_per_sqm"] = display_df["price_per_sqm"].apply(
+            lambda value: format_money_per_sqm(value) if pd.notna(value) else "N/A"
+        )
+
+    st.markdown("**Comparable table**")
+    st.dataframe(
+        display_df[
+            [
+                "street",
+                "postcode",
+                "price",
+                "floor_area_sqm",
+                "price_per_sqm",
+                "epc_rating",
+                "epc_status",
+                "epc_address",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    if not matched_df.empty:
+        st.markdown("**Price-per-sqm distribution**")
+        chart_df = matched_df[["street", "price_per_sqm"]].set_index("street")
+        st.bar_chart(chart_df)
+
+    with st.expander("EPC API setup"):
+        st.write(
+            "The current official service uses a bearer token from `get-energy-performance-data.communities.gov.uk`. "
+            "For Streamlit Cloud, add `EPC_BEARER_TOKEN` to your app secrets so the Area Intelligence page can fetch floor areas automatically."
+        )
 
 
 # ============================
@@ -929,6 +1328,9 @@ if page == "Analyse Deal":
                 st.session_state.refurb_total = refurb["total"]
                 st.session_state.current_condition = current
                 st.session_state.target_condition = target
+                st.session_state.selected_postcode = normalize_postcode(postcode)
+                st.session_state.selected_street = street.title() if street else ""
+                st.session_state.selected_price = price
                 st.session_state.analysis_done = True
 
                 st.success("Analysis complete")
@@ -980,6 +1382,9 @@ if page == "Analyse Deal":
 
 elif page == "Deal Calculator":
     render_calculator_page()
+
+elif page == "Area Intelligence":
+    render_area_intelligence_page()
 
 else:
     st.subheader(page)
