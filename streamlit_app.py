@@ -322,6 +322,30 @@ def load_calculator_template_bytes():
 
 
 # ============================
+# POSTCODE GEOLOOKUP
+# ============================
+@st.cache_data(show_spinner=False)
+def fetch_nearby_postcodes(postcode, radius_meters=1500, limit=60):
+    normalized = normalize_postcode(postcode)
+    if not normalized:
+        return []
+
+    compact = re.sub(r"\s+", "", normalized)
+    response = requests.get(
+        f"https://api.postcodes.io/postcodes/{compact}/nearest",
+        params={"radius": radius_meters, "limit": limit},
+        timeout=20,
+    )
+
+    if response.status_code == 404:
+        return []
+
+    response.raise_for_status()
+    payload = response.json()
+    return payload.get("result", []) or []
+
+
+# ============================
 # EPC API
 # ============================
 @st.cache_data(show_spinner=False)
@@ -516,7 +540,7 @@ def zoopla_link(street, postcode):
 # ============================
 # COMPARABLES
 # ============================
-def find_comps(postcode, data, limit=10, subject_price=None):
+def find_comps(postcode, data, limit=10, subject_price=None, nearby_postcodes=None):
     if data is None:
         return pd.DataFrame(columns=["price", "postcode", "street", "district"])
 
@@ -524,18 +548,32 @@ def find_comps(postcode, data, limit=10, subject_price=None):
     normalized_postcode = normalize_postcode(postcode)
     sector_key = postcode_sector_key(postcode)
     outward_code = postcode_outward_code(postcode)
+    distance_lookup = {}
+
+    comps_df["normalized_postcode"] = comps_df["postcode"].apply(normalize_postcode)
+
+    if nearby_postcodes:
+        distance_lookup = {
+            normalize_postcode(item.get("postcode")): float(item.get("distance", 0))
+            for item in nearby_postcodes
+            if item.get("postcode")
+        }
+        if distance_lookup:
+            comps_df = comps_df[comps_df["normalized_postcode"].isin(distance_lookup.keys())]
+            comps_df["distance_m"] = comps_df["normalized_postcode"].map(distance_lookup)
+            comps_df["match_score"] = 10
 
     if normalized_postcode:
-        comps_df["normalized_postcode"] = comps_df["postcode"].apply(normalize_postcode)
         comps_df["sector_key"] = comps_df["postcode"].apply(postcode_sector_key)
         comps_df["outward_code"] = comps_df["postcode"].apply(postcode_outward_code)
-        comps_df["match_score"] = 0
-        comps_df.loc[comps_df["outward_code"] == outward_code, "match_score"] += 1
-        comps_df.loc[comps_df["sector_key"] == sector_key, "match_score"] += 2
-        comps_df.loc[comps_df["normalized_postcode"] == normalized_postcode, "match_score"] += 3
+        if "match_score" not in comps_df.columns:
+            comps_df["match_score"] = 0
+            comps_df.loc[comps_df["outward_code"] == outward_code, "match_score"] += 1
+            comps_df.loc[comps_df["sector_key"] == sector_key, "match_score"] += 2
+            comps_df.loc[comps_df["normalized_postcode"] == normalized_postcode, "match_score"] += 3
 
-        if (comps_df["match_score"] > 0).any():
-            comps_df = comps_df[comps_df["match_score"] > 0]
+            if (comps_df["match_score"] > 0).any():
+                comps_df = comps_df[comps_df["match_score"] > 0]
 
     comps_df = comps_df.dropna(subset=["price"])
     if subject_price is not None:
@@ -543,6 +581,9 @@ def find_comps(postcode, data, limit=10, subject_price=None):
     if "match_score" in comps_df.columns:
         sort_columns = ["match_score"]
         ascending = [False]
+        if "distance_m" in comps_df.columns:
+            sort_columns.append("distance_m")
+            ascending.append(True)
         if "price_gap" in comps_df.columns:
             sort_columns.append("price_gap")
             ascending.append(True)
@@ -1198,6 +1239,7 @@ def render_area_intelligence_page():
 
         with settings_col:
             max_comps = st.slider("Comparable sample size", min_value=3, max_value=15, value=8, step=1)
+            radius_meters = st.slider("Search radius (metres)", min_value=250, max_value=2000, value=1200, step=50)
             submitted = st.form_submit_button("Run Area Intelligence", use_container_width=True)
 
     if submitted:
@@ -1209,12 +1251,21 @@ def render_area_intelligence_page():
         else:
             land_data = load_data()
             subject_price = st.session_state.get("selected_price")
-            comps = find_comps(normalized_postcode, land_data, limit=max_comps, subject_price=subject_price)
+            nearby_postcodes = fetch_nearby_postcodes(normalized_postcode, radius_meters=radius_meters, limit=80)
+            comps = find_comps(
+                normalized_postcode,
+                land_data,
+                limit=max_comps,
+                subject_price=subject_price,
+                nearby_postcodes=nearby_postcodes,
+            )
             token = get_epc_bearer_token(manual_token)
             enriched_df, api_status = enrich_comparables_with_epc(comps, token)
             st.session_state.area_intelligence_result = {
                 "postcode": normalized_postcode,
                 "sample_size": max_comps,
+                "radius_meters": radius_meters,
+                "nearby_postcodes_found": len(nearby_postcodes),
                 "api_status": api_status,
                 "has_token": bool(token),
                 "table": enriched_df,
@@ -1230,12 +1281,9 @@ def render_area_intelligence_page():
     matched_df = result_df.dropna(subset=["floor_area_sqm", "price_per_sqm"]) if not result_df.empty else pd.DataFrame()
 
     st.markdown(f"**Postcode focus:** {result['postcode']}")
-    sector_key = postcode_sector_key(result["postcode"])
-    outward_code = postcode_outward_code(result["postcode"])
-    if sector_key and outward_code:
-        st.caption(
-            f"Comparable selection is prioritised by exact postcode, then sector `{sector_key}`, then outward code `{outward_code}`."
-        )
+    st.caption(
+        f"Nearby sold properties are pulled from your dataset using postcodes within roughly {result['radius_meters']} metres of the subject postcode."
+    )
 
     if result["api_status"] == "missing_token":
         st.warning(
@@ -1249,11 +1297,16 @@ def render_area_intelligence_page():
 
     metric_col1, metric_col2, metric_col3 = st.columns(3)
     metric_col1.metric("Comparables found", str(len(result_df)))
-    metric_col2.metric("EPC floor areas matched", str(len(matched_df)))
+    metric_col2.metric("Nearby postcodes checked", str(result.get("nearby_postcodes_found", 0)))
     metric_col3.metric(
         "Median price per sqm",
         format_money_per_sqm(matched_df["price_per_sqm"].median()) if not matched_df.empty else "N/A",
     )
+
+    if not matched_df.empty:
+        epc_metric_col1, epc_metric_col2 = st.columns(2)
+        epc_metric_col1.metric("EPC floor areas matched", str(len(matched_df)))
+        epc_metric_col2.metric("Match rate", format_percent(safe_percent(len(matched_df), len(result_df))))
 
     if not matched_df.empty:
         detail_col1, detail_col2, detail_col3 = st.columns(3)
@@ -1272,6 +1325,10 @@ def render_area_intelligence_page():
         display_df["floor_area_sqm"] = display_df["floor_area_sqm"].apply(
             lambda value: f"{value:,.1f}" if pd.notna(value) else "N/A"
         )
+    if "distance_m" in display_df.columns:
+        display_df["distance_m"] = display_df["distance_m"].apply(
+            lambda value: f"{value:,.0f} m" if pd.notna(value) else "N/A"
+        )
     if "price_per_sqm" in display_df.columns:
         display_df["price_per_sqm"] = display_df["price_per_sqm"].apply(
             lambda value: format_money_per_sqm(value) if pd.notna(value) else "N/A"
@@ -1283,6 +1340,7 @@ def render_area_intelligence_page():
             [
                 "street",
                 "postcode",
+                "distance_m",
                 "price",
                 "floor_area_sqm",
                 "price_per_sqm",
