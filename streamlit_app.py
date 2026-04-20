@@ -36,7 +36,7 @@ page = st.sidebar.selectbox(
     ],
 )
 
-st.title("Carlisle Property Investment OS")
+st.title("Property Investment Acadmey AI Assistant")
 
 
 # ============================
@@ -843,24 +843,6 @@ if "analysis_done" not in st.session_state:
 # ============================
 def render_calculator_page():
     render_calculator_styles()
-
-    st.markdown(
-        """
-        <div class="calc-hero">
-            <h3>Deal Calculator</h3>
-            <p>Use the same BRR and Flip logic from your deal stacker, but as a guided app with live metrics instead of spreadsheet cells.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        """
-        <div class="calc-note">
-            Tweak leverage, timing, fees, refurb spend, and exit assumptions. The numbers update instantly so users can pressure-test a deal without touching a workbook.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
     brr_tab, flip_tab = st.tabs(["BRR Strategy", "Flip Strategy"])
 
