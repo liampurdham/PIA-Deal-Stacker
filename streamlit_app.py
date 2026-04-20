@@ -167,6 +167,11 @@ def normalize_address_text(value):
     return re.sub(r"\s+", " ", text).strip()
 
 
+def looks_like_certificate_number(value):
+    text = str(value or "").strip()
+    return bool(re.fullmatch(r"\d{4}-\d{4}-\d{4}-\d{4}-\d{4}", text))
+
+
 def build_epc_address(record):
     parts = [
         record.get("addressLine1") or record.get("address_line_1"),
@@ -1197,7 +1202,9 @@ def render_area_intelligence_page():
 
     if submitted:
         normalized_postcode = normalize_postcode(postcode)
-        if not normalized_postcode:
+        if looks_like_certificate_number(postcode):
+            st.error("That looks like an EPC certificate number. Enter the property's postcode here instead.")
+        elif not normalized_postcode:
             st.error("Add a postcode first.")
         else:
             land_data = load_data()
