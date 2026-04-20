@@ -149,8 +149,16 @@ def normalize_postcode(postcode):
 
 
 def postcode_sector_key(postcode):
-    cleaned = re.sub(r"\s+", "", str(postcode or "")).upper()
-    return cleaned[:4]
+    normalized = normalize_postcode(postcode)
+    parts = normalized.split()
+    if len(parts) == 2 and parts[1]:
+        return f"{parts[0]} {parts[1][0]}"
+    return normalized
+
+
+def postcode_outward_code(postcode):
+    normalized = normalize_postcode(postcode)
+    return normalized.split()[0] if normalized else ""
 
 
 def normalize_address_text(value):
@@ -503,29 +511,46 @@ def zoopla_link(street, postcode):
 # ============================
 # COMPARABLES
 # ============================
-def find_comps(postcode, data, limit=10):
+def find_comps(postcode, data, limit=10, subject_price=None):
     if data is None:
         return pd.DataFrame(columns=["price", "postcode", "street", "district"])
 
     comps_df = data.copy()
     normalized_postcode = normalize_postcode(postcode)
     sector_key = postcode_sector_key(postcode)
+    outward_code = postcode_outward_code(postcode)
 
     if normalized_postcode:
         comps_df["normalized_postcode"] = comps_df["postcode"].apply(normalize_postcode)
         comps_df["sector_key"] = comps_df["postcode"].apply(postcode_sector_key)
+        comps_df["outward_code"] = comps_df["postcode"].apply(postcode_outward_code)
         comps_df["match_score"] = 0
+        comps_df.loc[comps_df["outward_code"] == outward_code, "match_score"] += 1
         comps_df.loc[comps_df["sector_key"] == sector_key, "match_score"] += 2
         comps_df.loc[comps_df["normalized_postcode"] == normalized_postcode, "match_score"] += 3
-        comps_df = comps_df[comps_df["match_score"] > 0]
+
+        if (comps_df["match_score"] > 0).any():
+            comps_df = comps_df[comps_df["match_score"] > 0]
 
     comps_df = comps_df.dropna(subset=["price"])
+    if subject_price is not None:
+        comps_df["price_gap"] = (comps_df["price"] - subject_price).abs()
     if "match_score" in comps_df.columns:
-        comps_df = comps_df.sort_values(["match_score", "price"], ascending=[False, True])
+        sort_columns = ["match_score"]
+        ascending = [False]
+        if "price_gap" in comps_df.columns:
+            sort_columns.append("price_gap")
+            ascending.append(True)
+        sort_columns.append("price")
+        ascending.append(True)
+        comps_df = comps_df.sort_values(sort_columns, ascending=ascending)
     else:
         comps_df = comps_df.sort_values("price")
 
-    return comps_df.head(limit).drop(columns=["normalized_postcode", "sector_key", "match_score"], errors="ignore")
+    return comps_df.head(limit).drop(
+        columns=["normalized_postcode", "sector_key", "outward_code", "match_score", "price_gap"],
+        errors="ignore",
+    )
 
 
 # ============================
@@ -1154,7 +1179,12 @@ def render_area_intelligence_page():
         input_col, settings_col = st.columns([2, 1])
 
         with input_col:
-            postcode = st.text_input("Subject postcode", value=selected_postcode, placeholder="CA1 2AB")
+            postcode = st.text_input(
+                "Subject postcode",
+                value=selected_postcode,
+                placeholder="CA1 2AB",
+                help="Enter a postcode here, not an EPC certificate number.",
+            )
             manual_token = st.text_input(
                 "EPC bearer token (optional override)",
                 type="password",
@@ -1171,7 +1201,8 @@ def render_area_intelligence_page():
             st.error("Add a postcode first.")
         else:
             land_data = load_data()
-            comps = find_comps(normalized_postcode, land_data, limit=max_comps)
+            subject_price = st.session_state.get("selected_price")
+            comps = find_comps(normalized_postcode, land_data, limit=max_comps, subject_price=subject_price)
             token = get_epc_bearer_token(manual_token)
             enriched_df, api_status = enrich_comparables_with_epc(comps, token)
             st.session_state.area_intelligence_result = {
@@ -1180,6 +1211,7 @@ def render_area_intelligence_page():
                 "api_status": api_status,
                 "has_token": bool(token),
                 "table": enriched_df,
+                "subject_price": subject_price,
             }
 
     result = st.session_state.get("area_intelligence_result")
@@ -1192,8 +1224,11 @@ def render_area_intelligence_page():
 
     st.markdown(f"**Postcode focus:** {result['postcode']}")
     sector_key = postcode_sector_key(result["postcode"])
-    if sector_key:
-        st.caption(f"Comparable selection is prioritised around the postcode sector `{sector_key}`.")
+    outward_code = postcode_outward_code(result["postcode"])
+    if sector_key and outward_code:
+        st.caption(
+            f"Comparable selection is prioritised by exact postcode, then sector `{sector_key}`, then outward code `{outward_code}`."
+        )
 
     if result["api_status"] == "missing_token":
         st.warning(
@@ -1302,7 +1337,7 @@ if page == "Analyse Deal":
                 price = parse_price(data["price"])
                 sqm = estimate_sqm(data["bedrooms"])
                 street, postcode = extract_location(data["name"])
-                comps = find_comps(postcode, land_data)
+                comps = find_comps(postcode, land_data, subject_price=price)
                 multiplier = condition_multiplier(current, target)
 
                 refurb = refurb_engine(
