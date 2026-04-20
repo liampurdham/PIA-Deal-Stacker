@@ -12,11 +12,15 @@ st.set_page_config(layout="wide", page_title="Carlisle Property Investment OS")
 
 
 # ============================
-# CONFIG — DATA SOURCES
+# CONFIG - DATA SOURCES
 # ============================
 DATA_URL = "https://raw.githubusercontent.com/liampurdham/PIA-Deal-Stacker/main/pp-complete.csv"
 LOCAL_FILE = "pp-complete.csv"
 DEAL_TEMPLATE_FILE = "Deal Stacking Template - PIA.xlsx"
+DEAL_TEMPLATE_URL = (
+    "https://raw.githubusercontent.com/liampurdham/PIA-Deal-Stacker/main/"
+    "Deal%20Stacking%20Template%20-%20PIA.xlsx"
+)
 
 
 # ============================
@@ -47,7 +51,7 @@ def load_data():
         df = pd.read_csv(DATA_URL)
         st.sidebar.success("Loaded dataset from GitHub")
     except Exception:
-        st.sidebar.warning("GitHub load failed — trying local file")
+        st.sidebar.warning("GitHub load failed - trying local file")
 
         base_dir = Path(__file__).resolve().parent
         file_path = base_dir / LOCAL_FILE
@@ -104,26 +108,44 @@ def prepare_sheet_for_display(df):
     return cleaned
 
 
-@st.cache_data
-def load_calculator_template():
-    template_path = Path(__file__).resolve().parent / DEAL_TEMPLATE_FILE
-
-    if not template_path.exists():
-        return None, {}
-
+def parse_calculator_workbook(file_bytes):
     workbook = pd.read_excel(
-        template_path,
+        BytesIO(file_bytes),
         sheet_name=None,
         header=None,
         engine="openpyxl",
     )
 
-    sheets = {
+    return {
         sheet_name: prepare_sheet_for_display(df)
         for sheet_name, df in workbook.items()
     }
 
-    return template_path.read_bytes(), sheets
+
+@st.cache_data
+def load_calculator_template():
+    template_path = Path(__file__).resolve().parent / DEAL_TEMPLATE_FILE
+
+    if template_path.exists():
+        file_bytes = template_path.read_bytes()
+        return file_bytes, parse_calculator_workbook(file_bytes), "repo file"
+
+    try:
+        response = requests.get(
+            DEAL_TEMPLATE_URL,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        file_bytes = response.content
+        return file_bytes, parse_calculator_workbook(file_bytes), "GitHub"
+    except Exception:
+        return None, {}, None
+
+
+def load_uploaded_calculator_template(uploaded_file):
+    file_bytes = uploaded_file.getvalue()
+    return file_bytes, parse_calculator_workbook(file_bytes)
 
 
 def extract_sheet_summary(sheet_df):
@@ -281,9 +303,8 @@ def analyse(price, sqm, ppsqm, refurb_total):
     if price is None:
         price = 0
 
-    refurb = refurb_total
     gdv = sqm * ppsqm
-    total = price + refurb + 13000
+    total = price + refurb_total + 13000
     profit = gdv - total
     roi = round((profit / total) * 100, 2) if total else 0.0
 
@@ -310,13 +331,30 @@ def render_calculator_page():
         "The BRR and Flip workbook is bundled into the app so users can review and tweak the template in-browser."
     )
 
-    template_bytes, sheets = load_calculator_template()
+    template_bytes, sheets, template_source = load_calculator_template()
 
     if not sheets:
-        st.error(
-            f"Could not find `{DEAL_TEMPLATE_FILE}` next to the app file. Add it to the repo so Streamlit can load it."
+        uploaded_template = st.file_uploader(
+            "Upload your deal stacking workbook",
+            type=["xlsx"],
+            help="Use this if the template is not yet bundled into the GitHub repo.",
         )
-        return
+        if uploaded_template is not None:
+            try:
+                template_bytes, sheets = load_uploaded_calculator_template(uploaded_template)
+                template_source = "uploaded file"
+                st.success("Workbook loaded from upload.")
+            except Exception as exc:
+                st.error(f"That workbook could not be read: {exc}")
+                return
+        else:
+            st.error(f"Could not find `{DEAL_TEMPLATE_FILE}` in the deployed app.")
+            st.info(
+                "Add the `.xlsx` file to the same GitHub repo as `app.py`, or upload the workbook here manually."
+            )
+            return
+    else:
+        st.success(f"Workbook loaded from {template_source}.")
 
     st.info("Most user inputs in this template live in column B. The right-hand blocks are reference calculators.")
 
@@ -348,7 +386,7 @@ def render_calculator_page():
 
                     numeric_values = pd.to_numeric(summary_df["Value"], errors="coerce").dropna()
                     if not numeric_values.empty:
-                        st.metric("Visible numeric total", f"£{numeric_values.sum():,.0f}")
+                        st.metric("Visible numeric total", f"GBP {numeric_values.sum():,.0f}")
 
             st.download_button(
                 f"Download {sheet_name} as CSV",
