@@ -32,7 +32,6 @@ page = st.sidebar.selectbox(
     "Navigation",
     [
         "Analyse Deal",
-        "Deal Calculator",
         "Compare Deals",
         "Portfolio",
         "Area Intelligence",
@@ -1162,21 +1161,60 @@ if "area_intelligence_result" not in st.session_state:
     st.session_state.area_intelligence_result = None
 
 
+def seed_project_type_defaults():
+    if not st.session_state.get("analysis_done"):
+        return
+
+    data = st.session_state.get("data", {})
+    result = st.session_state.get("result", {})
+    refurb = st.session_state.get("refurb", {})
+    selected_postcode = st.session_state.get("selected_postcode", "")
+    selected_price = st.session_state.get("selected_price", 0) or 0
+    selected_name = data.get("name", "")
+    refurb_total = int(round(refurb.get("total", 25000) or 25000))
+    gdv = int(round(result.get("gdv", selected_price) or selected_price))
+    project_seed = f"{selected_name}|{selected_postcode}|{selected_price}|{gdv}|{refurb_total}"
+
+    if st.session_state.get("project_defaults_seed") == project_seed:
+        return
+
+    defaults = {
+        "brr_property_address": selected_name,
+        "brr_property_reference": selected_postcode,
+        "brr_purchase_price": int(selected_price),
+        "brr_gdv": int(gdv),
+        "brr_refurb_cost": refurb_total,
+        "flip_property_address": selected_name,
+        "flip_property_reference": selected_postcode,
+        "flip_purchase_price": int(selected_price),
+        "flip_sale_price": int(gdv),
+        "flip_refurb_cost": refurb_total,
+    }
+
+    for key, value in defaults.items():
+        st.session_state[key] = value
+
+    st.session_state.project_defaults_seed = project_seed
+
+
 # ============================
 # CALCULATOR PAGE
 # ============================
 def render_calculator_page():
+    seed_project_type_defaults()
     render_calculator_styles()
 
     st.markdown(
         """
         <div class="calc-hero">
-            <h3>Deal Calculator</h3>
+            <h3>Project Builder</h3>
             <p>Choose a project type and shape the whole deal with live metrics instead of spreadsheet cells.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
+    if st.session_state.get("analysis_done"):
+        st.caption("Project Type inputs are prefilled from the current analysed deal and refurb total.")
     st.markdown(
         """
         <div class="calc-note">
@@ -1481,7 +1519,9 @@ if page == "Analyse Deal":
         col2.metric("Profit", format_money(result["profit"]))
         col3.metric("ROI", f"{result['roi']}%")
 
-elif page == "Deal Calculator":
+    st.divider()
+    st.subheader("Project Builder")
+    st.caption("Use the analysed deal as the starting point for the full project numbers below.")
     render_calculator_page()
 
 elif page == "Area Intelligence":
