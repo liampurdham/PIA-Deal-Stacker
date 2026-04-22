@@ -1769,7 +1769,14 @@ if page == "Analyse Deal":
     st.divider()
     st.subheader("Project Builder")
     st.caption("Use the analysed deal as the starting point for the full project numbers below.")
-    render_calculator_page()
+    project_outputs, project_details = render_calculator_page()
+
+    st.divider()
+    render_investor_funding_section(
+        project_outputs,
+        project_details,
+        st.session_state.get("data"),
+    )
 
 elif page == "Area Intelligence":
     render_area_intelligence_page()
