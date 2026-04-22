@@ -1,7 +1,7 @@
-from pathlib import Path
 import os
 from pathlib import Path
 import re
+from html import escape
 
 import pandas as pd
 import requests
@@ -164,6 +164,32 @@ def render_calculator_styles():
             margin: 0.3rem 0;
             color: #50574f;
         }
+        .dashboard-stat {
+            padding: 1rem 1.05rem;
+            border-radius: 18px;
+            background: linear-gradient(180deg, #fffdf8 0%, #f4efe5 100%);
+            border: 1px solid #dfd5c3;
+            box-shadow: 0 8px 24px rgba(55, 47, 31, 0.06);
+            min-height: 126px;
+        }
+        .dashboard-stat-label {
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: #6b7068;
+            margin-bottom: 0.55rem;
+        }
+        .dashboard-stat-value {
+            font-size: 1.55rem;
+            line-height: 1.1;
+            color: #1e2c24;
+            font-weight: 700;
+        }
+        .dashboard-stat-note {
+            margin-top: 0.6rem;
+            color: #5f685f;
+            font-size: 0.92rem;
+        }
         .deal-chip-row {
             display: flex;
             flex-wrap: wrap;
@@ -178,10 +204,153 @@ def render_calculator_styles():
             color: #29402f;
             font-size: 0.92rem;
         }
+        .dashboard-badge-positive {
+            background: #e3efe0;
+            border-color: #b8cfb6;
+            color: #1f4d2a;
+        }
+        .dashboard-badge-watch {
+            background: #f2eadb;
+            border-color: #d9c8a6;
+            color: #6c4f18;
+        }
+        .dashboard-comps-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 0.9rem;
+            margin-top: 0.75rem;
+        }
+        .comp-card {
+            border-radius: 20px;
+            overflow: hidden;
+            border: 1px solid #ddd1bc;
+            background: #fffaf2;
+            box-shadow: 0 10px 26px rgba(64, 49, 28, 0.08);
+        }
+        .comp-thumb {
+            min-height: 118px;
+            padding: 0.9rem;
+            display: flex;
+            align-items: flex-end;
+            color: #fffdf7;
+            font-weight: 700;
+            font-size: 1.05rem;
+            letter-spacing: 0.02em;
+        }
+        .comp-body {
+            padding: 0.95rem 1rem 1rem 1rem;
+        }
+        .comp-meta {
+            color: #5b625b;
+            font-size: 0.92rem;
+            margin: 0.22rem 0;
+        }
+        .comp-price {
+            color: #213126;
+            font-weight: 700;
+            font-size: 1.15rem;
+            margin: 0.35rem 0 0.55rem 0;
+        }
+        .comp-link {
+            display: inline-block;
+            margin-top: 0.4rem;
+            padding: 0.48rem 0.78rem;
+            border-radius: 999px;
+            text-decoration: none;
+            background: #213126;
+            color: #f8f4ea !important;
+            font-size: 0.92rem;
+        }
+        .investor-preview {
+            padding: 1.15rem 1.2rem;
+            border-radius: 22px;
+            background: linear-gradient(140deg, #f7f1e5 0%, #eef3eb 100%);
+            border: 1px solid #d9ccb5;
+            margin-top: 0.8rem;
+        }
+        .investor-preview h3 {
+            margin: 0 0 0.35rem 0;
+            color: #213126;
+        }
+        .investor-preview p {
+            color: #505a52;
+            margin: 0.25rem 0 0.45rem 0;
+        }
+        .investor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 0.85rem;
+            margin-top: 0.8rem;
+        }
+        .investor-panel {
+            background: rgba(255, 250, 242, 0.82);
+            border: 1px solid #e0d6c6;
+            border-radius: 18px;
+            padding: 0.95rem 1rem;
+        }
+        .investor-panel h4 {
+            margin: 0 0 0.45rem 0;
+            color: #243229;
+        }
+        .investor-panel p {
+            margin: 0.3rem 0;
+            color: #50574f;
+        }
+        .email-preview {
+            padding: 1rem 1.1rem;
+            border-radius: 18px;
+            background: #fffaf2;
+            border: 1px solid #ddd2c0;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
+            white-space: pre-wrap;
+            color: #313732;
+            line-height: 1.6;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def visual_gradient_from_text(value):
+    gradients = [
+        "linear-gradient(135deg, #345c4a 0%, #7ea27c 100%)",
+        "linear-gradient(135deg, #5f4b32 0%, #b48a57 100%)",
+        "linear-gradient(135deg, #35586d 0%, #7fa0b2 100%)",
+        "linear-gradient(135deg, #6b5a4b 0%, #a89a7d 100%)",
+        "linear-gradient(135deg, #3d4e5a 0%, #8aa0ad 100%)",
+    ]
+    index = sum(ord(character) for character in str(value or "")) % len(gradients)
+    return gradients[index]
+
+
+def build_dashboard_stat_html(label, value, note, badge_class):
+    return f"""
+    <div class="dashboard-stat">
+        <div class="dashboard-stat-label">{escape(str(label))}</div>
+        <div class="dashboard-stat-value">{escape(str(value))}</div>
+        <div class="deal-chip {badge_class}">{escape(str(note))}</div>
+    </div>
+    """
+
+
+def build_comp_card_html(row):
+    price_text = format_money(row["price"]) if pd.notna(row["price"]) else "N/A"
+    postcode_text = normalize_postcode(row.get("postcode", ""))
+    street_text = row.get("street", "Comparable")
+    link = zoopla_link(row.get("street", ""), row.get("postcode", ""))
+    thumb_style = visual_gradient_from_text(street_text)
+    return f"""
+    <div class="comp-card">
+        <div class="comp-thumb" style="background: {thumb_style};">{escape(str(street_text))}</div>
+        <div class="comp-body">
+            <div class="comp-meta">{escape(postcode_text)}</div>
+            <div class="comp-price">{escape(price_text)}</div>
+            <div class="comp-meta">Previously sold comparable in the local search set.</div>
+            <a class="comp-link" href="{escape(link)}" target="_blank">Open comp search</a>
+        </div>
+    </div>
+    """
 
 
 def render_deal_dashboard(data, result, refurb, comps, current_condition, target_condition):
@@ -212,11 +381,42 @@ def render_deal_dashboard(data, result, refurb, comps, current_condition, target
         unsafe_allow_html=True,
     )
 
-    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-    metric_col1.metric("GDV", format_money(result.get("gdv", 0)))
-    metric_col2.metric("Profit", format_money(result.get("profit", 0)))
-    metric_col3.metric("ROI", f"{result.get('roi', 0)}%")
-    metric_col4.metric("Best nearby comp", format_money(top_comp_price) if top_comp_price else "N/A")
+    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+    with stat_col1:
+        st.markdown(
+            build_dashboard_stat_html("GDV", format_money(result.get("gdv", 0)), "Projected end value", "dashboard-badge-watch"),
+            unsafe_allow_html=True,
+        )
+    with stat_col2:
+        st.markdown(
+            build_dashboard_stat_html(
+                "Profit",
+                format_money(result.get("profit", 0)),
+                "Margin worth chasing" if result.get("profit", 0) > 0 else "Needs a second look",
+                "dashboard-badge-positive" if result.get("profit", 0) > 0 else "dashboard-badge-watch",
+            ),
+            unsafe_allow_html=True,
+        )
+    with stat_col3:
+        st.markdown(
+            build_dashboard_stat_html(
+                "ROI",
+                f"{result.get('roi', 0)}%",
+                "Healthy uplift" if result.get("roi", 0) >= 15 else "Watch the numbers",
+                "dashboard-badge-positive" if result.get("roi", 0) >= 15 else "dashboard-badge-watch",
+            ),
+            unsafe_allow_html=True,
+        )
+    with stat_col4:
+        st.markdown(
+            build_dashboard_stat_html(
+                "Best Nearby Comp",
+                format_money(top_comp_price) if top_comp_price else "N/A",
+                "Local benchmark",
+                "dashboard-badge-watch",
+            ),
+            unsafe_allow_html=True,
+        )
 
     info_col1, info_col2 = st.columns([1.05, 0.95])
 
@@ -250,16 +450,10 @@ def render_deal_dashboard(data, result, refurb, comps, current_condition, target
 
     st.markdown("**Nearby Comparables**")
     if comps is not None and len(comps) > 0:
-        comps_display = comps.copy().head(6)
-        comps_display["price"] = comps_display["price"].apply(lambda value: format_money(value) if pd.notna(value) else "N/A")
-        comps_display["search_link"] = comps_display.apply(
-            lambda row: zoopla_link(row["street"], row["postcode"]),
-            axis=1,
-        )
-        st.dataframe(
-            comps_display[["street", "postcode", "price", "search_link"]],
-            use_container_width=True,
-            hide_index=True,
+        comp_cards_html = "".join(build_comp_card_html(row) for _, row in comps.head(6).iterrows())
+        st.markdown(
+            f'<div class="dashboard-comps-grid">{comp_cards_html}</div>',
+            unsafe_allow_html=True,
         )
     else:
         st.info("No comparables found for this property yet.")
@@ -1597,8 +1791,41 @@ def render_investor_funding_section(project_outputs, project_details, analysis_d
         st.markdown("### Investor Materials")
 
     if generate_pack:
-        st.markdown("**Investor Pack Preview**")
-        st.markdown(pack_text)
+        headline_value = project_outputs.get("gdv") or project_details.get("sale_price") or project_outputs.get("net_sale_proceeds", 0)
+        headline_profit = project_outputs.get("equity_created")
+        if headline_profit is None:
+            headline_profit = project_outputs.get("profit", 0)
+        pack_preview_html = f"""
+        <div class="investor-preview">
+            <h3>Investor Pack Preview</h3>
+            <p>{escape(project_details.get('property_address') or 'Selected property')} | {escape(project_details.get('project_type', 'Project'))}</p>
+            <div class="investor-grid">
+                <div class="investor-panel">
+                    <h4>Raise Snapshot</h4>
+                    <p><strong>Raise target:</strong> {escape(format_money(investor_required))}</p>
+                    <p><strong>Your cash:</strong> {escape(format_money(available_cash))}</p>
+                    <p><strong>Target return:</strong> {escape(format_percent(target_return_pct))}</p>
+                    <p><strong>Profit share:</strong> {escape(format_percent(profit_share_pct))}</p>
+                </div>
+                <div class="investor-panel">
+                    <h4>Deal Numbers</h4>
+                    <p><strong>Purchase:</strong> {escape(format_money(project_details.get('purchase_price', 0)))}</p>
+                    <p><strong>Refurb:</strong> {escape(format_money(project_details.get('refurb_cost', 0)))}</p>
+                    <p><strong>Exit value:</strong> {escape(format_money(headline_value))}</p>
+                    <p><strong>Forecast upside:</strong> {escape(format_money(headline_profit))}</p>
+                </div>
+                <div class="investor-panel">
+                    <h4>Why It Lands</h4>
+                    <p>One joined-up workflow covering entry, refurb, finance, and exit.</p>
+                    <p>The capital raise is tied to a specific project funding gap.</p>
+                    <p>Live numbers are already pressure-tested inside the project builder.</p>
+                </div>
+            </div>
+        </div>
+        """
+        st.markdown(pack_preview_html, unsafe_allow_html=True)
+        with st.expander("Open full investor pack text"):
+            st.markdown(pack_text)
         st.download_button(
             "Download investor pack",
             data=pack_text.encode("utf-8"),
@@ -1609,7 +1836,10 @@ def render_investor_funding_section(project_outputs, project_details, analysis_d
 
     if generate_email:
         st.markdown("**Investor Email Draft**")
-        st.code(email_text, language="text")
+        st.markdown(
+            f'<div class="email-preview">{escape(email_text)}</div>',
+            unsafe_allow_html=True,
+        )
         st.download_button(
             "Download investor email",
             data=email_text.encode("utf-8"),
