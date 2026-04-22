@@ -970,6 +970,19 @@ def render_brr_calculator():
     st.caption(
         "SDLT follows the banding shown in your original template, so the calculator stays aligned with your deal stacker workbook."
     )
+    return brr_outputs, {
+        "project_type": "BRR",
+        "property_address": property_address,
+        "property_reference": property_reference,
+        "purchase_price": purchase_price,
+        "gdv": gdv,
+        "refurb_cost": refurb_cost,
+        "holding_cost": holding_cost,
+        "planning_cost": planning_cost,
+        "bridge_months": bridge_months,
+        "bridge_funding_pct": bridge_funding_pct,
+        "monthly_rent": monthly_rent,
+    }
 
 
 def render_flip_calculator():
@@ -1149,6 +1162,18 @@ def render_flip_calculator():
     st.caption(
         "This mirrors the workbook as a deal-first UI: sliders for leverage and fees, then live outputs for profit, margin, and cash required."
     )
+    return flip_outputs, {
+        "project_type": "Flip",
+        "property_address": property_address,
+        "property_reference": property_reference,
+        "purchase_price": purchase_price,
+        "sale_price": sale_price,
+        "refurb_cost": refurb_cost,
+        "holding_cost": holding_cost,
+        "planning_cost": planning_cost,
+        "bridge_months": bridge_months,
+        "bridge_funding_pct": bridge_funding_pct,
+    }
 
 
 # ============================
@@ -1197,6 +1222,114 @@ def seed_project_type_defaults():
     st.session_state.project_defaults_seed = project_seed
 
 
+def build_investor_pack(project_details, project_outputs, investor_inputs, analysis_data=None):
+    property_name = project_details.get("property_address") or "Selected property"
+    project_type = project_details.get("project_type", "Project")
+    purchase_price = project_details.get("purchase_price", 0)
+    refurb_cost = project_details.get("refurb_cost", 0)
+    available_cash = investor_inputs.get("available_cash", 0)
+    investor_required = investor_inputs.get("investor_required", 0)
+    target_return = investor_inputs.get("target_return_pct", 0)
+    proposed_share = investor_inputs.get("profit_share_pct", 0)
+
+    headline_value = project_outputs.get("gdv") or project_details.get("sale_price") or project_outputs.get("net_sale_proceeds", 0)
+    headline_profit = project_outputs.get("equity_created")
+    if headline_profit is None:
+        headline_profit = project_outputs.get("profit", 0)
+
+    summary_line = analysis_data.get("name") if analysis_data else property_name
+
+    return f"""# Investor Pack - {property_name}
+
+## Opportunity Snapshot
+- Property: {summary_line}
+- Project Type: {project_type}
+- Purchase Price: {format_money(purchase_price)}
+- Refurb Budget: {format_money(refurb_cost)}
+- Headline Exit Value: {format_money(headline_value)}
+- Forecast Profit / Equity Uplift: {format_money(headline_profit)}
+
+## Capital Stack
+- Total Cash Required: {format_money(project_outputs.get('cash_required', 0))}
+- Operator Cash Going In: {format_money(available_cash)}
+- Investor Funds Required: {format_money(investor_required)}
+- Proposed Investor Target Return: {target_return:.1f}%
+- Proposed Investor Profit Share: {proposed_share:.1f}%
+
+## Why This Deal Works
+- The project has already been underwritten through the in-app analysis and project builder.
+- Refurb, finance, and exit assumptions are built into one workflow rather than split across separate sheets.
+- The deal can be positioned either as a refinance-led BRR project or a clean flip, depending on the selected project type.
+
+## Key Project Numbers
+- Stamp Duty / Entry Tax: {format_money(project_outputs.get('sdlt', 0))}
+- Purchase Costs: {format_money(project_outputs.get('purchase_costs', 0))}
+- Development Costs: {format_money(project_outputs.get('development_costs', 0))}
+- Gross Bridge: {format_money(project_outputs.get('gross_bridge', 0))}
+- Bridge Interest: {format_money(project_outputs.get('bridging_interest', 0))}
+
+## Exit View
+"""
+
+
+def build_investor_pack_exit_section(project_details, project_outputs):
+    if project_details.get("project_type") == "BRR":
+        return f"""- Refinance Proceeds: {format_money(project_outputs.get('refinance_proceeds', 0))}
+- Cash Left In Deal: {format_money(project_outputs.get('cash_left_in_deal', 0))}
+- Annual Profit: {format_money(project_outputs.get('annual_profit', 0))}
+- Cash-on-Cash ROI: {format_percent(project_outputs.get('cash_on_cash_roi', 0))}
+- Profit on Cost: {format_percent(project_outputs.get('profit_on_cost', 0))}
+"""
+
+    return f"""- Net Sale Proceeds: {format_money(project_outputs.get('net_sale_proceeds', 0))}
+- Total Costs Including Sale: {format_money(project_outputs.get('total_costs_with_sale', 0))}
+- Profit / Loss: {format_money(project_outputs.get('profit', 0))}
+- Profit on Cash: {format_percent(project_outputs.get('profit_on_cash', 0))}
+- Profit Margin: {format_percent(project_outputs.get('profit_margin', 0))}
+"""
+
+
+def build_investor_pack_risks_section(project_details):
+    return f"""
+## Risk Control
+- Conservative timeline assumed: {project_details.get('bridge_months', 0)} months.
+- Refinance / sale route can be monitored and adjusted as market feedback comes in.
+- Cost planning includes refurb, holding, finance, and legal costs in one place.
+
+## Investor Positioning
+- This is suited to an investor who wants asset-backed exposure with a defined use of funds.
+- The raise is specifically to close the capital stack, not to fund an undefined future budget.
+- The project can be presented with transparent entry, works, and exit assumptions.
+"""
+
+
+def build_investor_email(project_details, project_outputs, investor_inputs, analysis_data=None):
+    property_name = project_details.get("property_address") or "this deal"
+    project_type = project_details.get("project_type", "project")
+    investor_required = investor_inputs.get("investor_required", 0)
+    headline_profit = project_outputs.get("equity_created")
+    if headline_profit is None:
+        headline_profit = project_outputs.get("profit", 0)
+
+    summary_line = analysis_data.get("name") if analysis_data else property_name
+
+    return f"""Subject: Investor opportunity - {summary_line}
+
+Hi [Investor Name],
+
+I hope you're well. I have a new {project_type.lower()} opportunity that I think could be a strong fit for you.
+
+The deal is centred on {summary_line}. The purchase price is {format_money(project_details.get('purchase_price', 0))} with a refurb budget of {format_money(project_details.get('refurb_cost', 0))}. Based on the current underwriting, the projected upside is around {format_money(headline_profit)}.
+
+I'm looking to raise {format_money(investor_required)} to complete the capital stack. I am putting in {format_money(investor_inputs.get('available_cash', 0))} personally, and I can share the full investor pack with the entry costs, works budget, finance assumptions, and exit numbers.
+
+If you're open to it, I'd love to send the pack over and talk you through the project this week.
+
+Best,
+[Your Name]
+"""
+
+
 # ============================
 # CALCULATOR PAGE
 # ============================
@@ -1224,14 +1357,17 @@ def render_calculator_page():
         unsafe_allow_html=True,
     )
 
-    st.markdown("**Project Type**")
-    brr_tab, flip_tab = st.tabs(["BRR", "Flip"])
+    project_type = st.radio(
+        "Project Type",
+        ["BRR", "Flip"],
+        horizontal=True,
+        key="active_project_type",
+    )
 
-    with brr_tab:
-        render_brr_calculator()
-
-    with flip_tab:
-        render_flip_calculator()
+    if project_type == "BRR":
+        project_outputs, project_details = render_brr_calculator()
+    else:
+        project_outputs, project_details = render_flip_calculator()
 
     template_bytes, template_source = load_calculator_template_bytes()
     with st.expander("Original workbook template"):
@@ -1245,6 +1381,117 @@ def render_calculator_page():
             )
         else:
             st.write("No workbook file is needed for the app-style calculator, but you can still add the template to the repo later if you want it downloadable.")
+
+    return project_outputs, project_details
+
+
+def render_investor_funding_section(project_outputs, project_details, analysis_data=None):
+    st.subheader("Funding & Investor Raise")
+    st.caption("Track how much cash you already have, identify any funding gap, and generate investor-ready material when outside capital is needed.")
+
+    cash_required = max(float(project_outputs.get("cash_required", 0)), 0.0)
+
+    capital_col, investor_col = st.columns([1.2, 1])
+
+    with capital_col:
+        available_cash = st.number_input(
+            "Your available cash to invest",
+            min_value=0,
+            value=25000,
+            step=5000,
+            key="available_cash_to_invest",
+        )
+        use_investor_funds = st.toggle(
+            "Use investor funds for this project",
+            value=cash_required > available_cash,
+            key="use_investor_funds",
+        )
+
+    investor_required = max(cash_required - available_cash, 0.0) if use_investor_funds else 0.0
+
+    with investor_col:
+        st.metric("Total cash required", format_money(cash_required))
+        st.metric("Your cash", format_money(available_cash))
+        st.metric("Investor funds needed", format_money(investor_required))
+
+    if not use_investor_funds or investor_required <= 0:
+        st.success("This project is fully covered by your own cash based on the current assumptions.")
+        return
+
+    terms_col_a, terms_col_b, terms_col_c = st.columns(3)
+    target_return_pct = terms_col_a.slider(
+        "Target investor return %",
+        min_value=5.0,
+        max_value=25.0,
+        value=12.0,
+        step=0.5,
+        key="target_investor_return_pct",
+    )
+    profit_share_pct = terms_col_b.slider(
+        "Investor profit share %",
+        min_value=10.0,
+        max_value=70.0,
+        value=35.0,
+        step=1.0,
+        key="investor_profit_share_pct",
+    )
+    investor_role = terms_col_c.selectbox(
+        "Investor style",
+        ["Private investor", "Joint venture partner", "Family office", "Angel investor"],
+        key="investor_role",
+    )
+
+    investor_inputs = {
+        "available_cash": available_cash,
+        "investor_required": investor_required,
+        "target_return_pct": target_return_pct,
+        "profit_share_pct": profit_share_pct,
+        "investor_role": investor_role,
+    }
+
+    pack_text = (
+        build_investor_pack(project_details, project_outputs, investor_inputs, analysis_data)
+        + build_investor_pack_exit_section(project_details, project_outputs)
+        + build_investor_pack_risks_section(project_details)
+    )
+    email_text = build_investor_email(project_details, project_outputs, investor_inputs, analysis_data)
+
+    st.markdown("**Investor Pitch Snapshot**")
+    pitch_col1, pitch_col2, pitch_col3 = st.columns(3)
+    pitch_col1.metric("Raise target", format_money(investor_required))
+    pitch_col2.metric("Investor target return", format_percent(target_return_pct))
+    pitch_col3.metric("Investor profit share", format_percent(profit_share_pct))
+
+    button_col1, button_col2 = st.columns(2)
+    with button_col1:
+        generate_pack = st.button("Generate Investor Pack", use_container_width=True, key="generate_investor_pack")
+    with button_col2:
+        generate_email = st.button("Generate Investor Email", use_container_width=True, key="generate_investor_email")
+
+    if generate_pack or generate_email:
+        st.markdown("### Investor Materials")
+
+    if generate_pack:
+        st.markdown("**Investor Pack Preview**")
+        st.markdown(pack_text)
+        st.download_button(
+            "Download investor pack",
+            data=pack_text.encode("utf-8"),
+            file_name="investor-pack.md",
+            mime="text/markdown",
+            key="download_investor_pack",
+        )
+
+    if generate_email:
+        st.markdown("**Investor Email Draft**")
+        st.code(email_text, language="text")
+        st.download_button(
+            "Download investor email",
+            data=email_text.encode("utf-8"),
+            file_name="investor-email.txt",
+            mime="text/plain",
+            key="download_investor_email",
+        )
 
 
 def render_area_intelligence_page():
