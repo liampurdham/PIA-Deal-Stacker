@@ -1168,7 +1168,26 @@ if "area_intelligence_result" not in st.session_state:
 def render_calculator_page():
     render_calculator_styles()
 
-    brr_tab, flip_tab = st.tabs(["BRR Strategy", "Flip Strategy"])
+    st.markdown(
+        """
+        <div class="calc-hero">
+            <h3>Deal Calculator</h3>
+            <p>Choose a project type and shape the whole deal with live metrics instead of spreadsheet cells.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        """
+        <div class="calc-note">
+            Tweak leverage, timing, fees, refurb spend, and exit assumptions. The numbers update instantly so users can pressure-test each project type without touching a workbook.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("**Project Type**")
+    brr_tab, flip_tab = st.tabs(["BRR", "Flip"])
 
     with brr_tab:
         render_brr_calculator()
