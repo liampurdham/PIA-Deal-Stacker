@@ -134,10 +134,135 @@ def render_calculator_styles():
             color: #4a4a44;
             margin-bottom: 1rem;
         }
+        .deal-hero {
+            padding: 1.4rem 1.6rem;
+            border-radius: 24px;
+            background: linear-gradient(135deg, #f4ede1 0%, #d8e5d5 55%, #c8d9d0 100%);
+            border: 1px solid #d1c1a8;
+            margin-bottom: 1rem;
+        }
+        .deal-hero h3 {
+            margin: 0 0 0.35rem 0;
+            color: #1f2d24;
+        }
+        .deal-hero p {
+            margin: 0;
+            color: #455247;
+        }
+        .deal-card {
+            padding: 1rem 1.1rem;
+            border-radius: 18px;
+            background: #fbf8f2;
+            border: 1px solid #e4dbc9;
+            min-height: 100%;
+        }
+        .deal-card h4 {
+            margin: 0 0 0.55rem 0;
+            color: #243229;
+        }
+        .deal-card p {
+            margin: 0.3rem 0;
+            color: #50574f;
+        }
+        .deal-chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+        }
+        .deal-chip {
+            padding: 0.4rem 0.7rem;
+            border-radius: 999px;
+            background: #e7efe6;
+            border: 1px solid #c6d7c4;
+            color: #29402f;
+            font-size: 0.92rem;
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
+
+def render_deal_dashboard(data, result, refurb, comps, current_condition, target_condition):
+    render_calculator_styles()
+
+    property_name = data.get("name", "Selected property")
+    refurb_total = refurb.get("total", 0)
+    refurb_base = refurb.get("base", 0)
+    refurb_adjusted = refurb.get("adjusted", 0)
+    contingency = refurb.get("contingency", 0)
+    top_comp_price = None
+    if comps is not None and len(comps) > 0:
+        top_comp_price = comps["price"].max()
+
+    st.markdown(
+        f"""
+        <div class="deal-hero">
+            <h3>Deal Dashboard</h3>
+            <p>{property_name}</p>
+            <div class="deal-chip-row">
+                <span class="deal-chip">Current: {current_condition}</span>
+                <span class="deal-chip">Target: {target_condition}</span>
+                <span class="deal-chip">Refurb Total: {format_money(refurb_total)}</span>
+                <span class="deal-chip">GDV: {format_money(result.get("gdv", 0))}</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    metric_col1.metric("GDV", format_money(result.get("gdv", 0)))
+    metric_col2.metric("Profit", format_money(result.get("profit", 0)))
+    metric_col3.metric("ROI", f"{result.get('roi', 0)}%")
+    metric_col4.metric("Best nearby comp", format_money(top_comp_price) if top_comp_price else "N/A")
+
+    info_col1, info_col2 = st.columns([1.05, 0.95])
+
+    with info_col1:
+        st.markdown(
+            f"""
+            <div class="deal-card">
+                <h4>Property Snapshot</h4>
+                <p><strong>Property:</strong> {property_name}</p>
+                <p><strong>Current condition:</strong> {current_condition}</p>
+                <p><strong>Target finish:</strong> {target_condition}</p>
+                <p><strong>Forecast profit:</strong> {format_money(result.get('profit', 0))}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with info_col2:
+        st.markdown(
+            f"""
+            <div class="deal-card">
+                <h4>Refurb Snapshot</h4>
+                <p><strong>Base works cost:</strong> {format_money(refurb_base)}</p>
+                <p><strong>Adjusted works cost:</strong> {format_money(refurb_adjusted)}</p>
+                <p><strong>Contingency:</strong> {format_money(contingency)}</p>
+                <p><strong>Total refurb budget:</strong> {format_money(refurb_total)}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("**Nearby Comparables**")
+    if comps is not None and len(comps) > 0:
+        comps_display = comps.copy().head(6)
+        comps_display["price"] = comps_display["price"].apply(lambda value: format_money(value) if pd.notna(value) else "N/A")
+        comps_display["search_link"] = comps_display.apply(
+            lambda row: zoopla_link(row["street"], row["postcode"]),
+            axis=1,
+        )
+        st.dataframe(
+            comps_display[["street", "postcode", "price", "search_link"]],
+            use_container_width=True,
+            hide_index=True,
+        )
+    else:
+        st.info("No comparables found for this property yet.")
 
 
 def normalize_postcode(postcode):
@@ -1728,43 +1853,18 @@ if page == "Analyse Deal":
 
     if st.session_state.analysis_done:
         st.divider()
-        st.subheader("Deal Dashboard")
-
         data = st.session_state.data
         result = st.session_state.result
         refurb = st.session_state.refurb
         comps = st.session_state.comps
-
-        st.subheader("Property Under Review")
-        st.markdown(f"**{data['name']}**")
-
-        st.subheader("Condition")
-        st.write(f"Current: {st.session_state.current_condition}")
-        st.write(f"Target: {st.session_state.target_condition}")
-
-        st.subheader("Refurbishment")
-        st.write(refurb)
-
-        st.subheader("Comparables")
-        if comps is not None and len(comps) > 0:
-            for _, row in comps.iterrows():
-                link = zoopla_link(row["street"], row["postcode"])
-                st.markdown(
-                    f"""
-                    **{row['street']}**  
-                    {format_money(int(row['price']))}  
-                    [View Property]({link})
-                    ---
-                    """
-                )
-        else:
-            st.write("No comparables found for this property yet.")
-
-        st.subheader("Headline Numbers")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("GDV", format_money(result["gdv"]))
-        col2.metric("Profit", format_money(result["profit"]))
-        col3.metric("ROI", f"{result['roi']}%")
+        render_deal_dashboard(
+            data,
+            result,
+            refurb,
+            comps,
+            st.session_state.current_condition,
+            st.session_state.target_condition,
+        )
 
     st.divider()
     st.subheader("Project Builder")
