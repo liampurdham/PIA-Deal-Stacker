@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 import re
 from html import escape
+from datetime import date
 
 import pandas as pd
 import requests
@@ -32,6 +33,7 @@ page = st.sidebar.selectbox(
     "Navigation",
     [
         "Analyse Deal",
+        "Property Maintenance",
         "Compare Deals",
         "Portfolio",
         "Area Intelligence",
@@ -351,6 +353,127 @@ def build_comp_card_html(row):
         </div>
     </div>
     """
+
+
+def add_task_row(rows, task_name, category, due_date, reminder_days, notes):
+    due_timestamp = pd.Timestamp(due_date).normalize()
+    reference_date = pd.Timestamp(date.today()).normalize()
+    reminder_date = due_timestamp - pd.Timedelta(days=reminder_days)
+    days_until_due = int((due_timestamp - reference_date).days)
+
+    if days_until_due < 0:
+        status = "Overdue"
+    elif reminder_date <= reference_date:
+        status = "Due Soon"
+    else:
+        status = "Upcoming"
+
+    rows.append(
+        {
+            "Task": task_name,
+            "Category": category,
+            "Due Date": due_timestamp.date(),
+            "Reminder Date": reminder_date.date(),
+            "Days Until Due": days_until_due,
+            "Status": status,
+            "Notes": notes,
+        }
+    )
+
+
+def build_maintenance_schedule(
+    tenant_move_in,
+    gas_safety_due,
+    eicr_due,
+    boiler_service_due,
+    gutter_clean_due,
+    custom_task_name="",
+    custom_task_due=None,
+    custom_task_frequency_months=12,
+):
+    move_in = pd.Timestamp(tenant_move_in).normalize()
+    rows = []
+
+    add_task_row(
+        rows,
+        "Tenant settling-in call",
+        "Tenancy",
+        move_in + pd.Timedelta(days=14),
+        3,
+        "Quick welfare check to make sure the tenant is settled and any snags are caught early.",
+    )
+    add_task_row(
+        rows,
+        "First property visit",
+        "Inspection",
+        move_in + pd.Timedelta(days=60),
+        10,
+        "Site visit to make sure the property is being lived in well and no maintenance issues are building up.",
+    )
+
+    for months_ahead in (3, 6, 9, 12):
+        add_task_row(
+            rows,
+            f"Routine property visit ({months_ahead} months)",
+            "Inspection",
+            move_in + pd.DateOffset(months=months_ahead),
+            14,
+            "Regular landlord visit and condition check.",
+        )
+
+    add_task_row(
+        rows,
+        "Tenancy renewal review",
+        "Tenancy",
+        move_in + pd.DateOffset(months=11),
+        30,
+        "Review rent, renewal options, and any works to plan before the tenancy anniversary.",
+    )
+    add_task_row(
+        rows,
+        "Gas safety certificate",
+        "Compliance",
+        gas_safety_due,
+        30,
+        "Book the gas engineer and make sure the certificate is renewed before expiry.",
+    )
+    add_task_row(
+        rows,
+        "EICR / electrical certification",
+        "Compliance",
+        eicr_due,
+        45,
+        "Electrical inspection reminder ahead of the current certificate due date.",
+    )
+    add_task_row(
+        rows,
+        "Boiler service",
+        "Maintenance",
+        boiler_service_due,
+        30,
+        "Annual boiler service to keep heating reliable and reduce emergency callouts.",
+    )
+    add_task_row(
+        rows,
+        "Gutter cleaning",
+        "Maintenance",
+        gutter_clean_due,
+        21,
+        "Prevent damp and overflow issues by clearing gutters before the due date.",
+    )
+
+    if str(custom_task_name).strip() and custom_task_due:
+        add_task_row(
+            rows,
+            str(custom_task_name).strip(),
+            "Custom",
+            custom_task_due,
+            14,
+            f"Custom task with an assumed repeat cycle of every {custom_task_frequency_months} months.",
+        )
+
+    schedule = pd.DataFrame(rows).sort_values(["Due Date", "Task"]).reset_index(drop=True)
+    return schedule
 
 
 def render_deal_dashboard(data, result, refurb, comps, current_condition, target_condition):
@@ -1849,6 +1972,130 @@ def render_investor_funding_section(project_outputs, project_details, analysis_d
         )
 
 
+def render_property_maintenance_page():
+    render_calculator_styles()
+    st.subheader("Property Maintenance")
+
+    property_name = ""
+    property_postcode = ""
+    if st.session_state.get("analysis_done") and st.session_state.get("data"):
+        property_name = st.session_state["data"].get("name", "")
+        property_postcode = st.session_state.get("selected_postcode", "")
+
+    st.markdown(
+        f"""
+        <div class="deal-hero">
+            <h3>Maintenance Planner</h3>
+            <p>{escape(property_name or 'Track tenancy, compliance, and recurring maintenance for each property.')}</p>
+            <div class="deal-chip-row">
+                <span class="deal-chip">Property: {escape(property_name or 'Manual entry')}</span>
+                <span class="deal-chip">Postcode: {escape(property_postcode or 'Add when known')}</span>
+                <span class="deal-chip">Focus: reminders before tasks are due</span>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    today = date.today()
+    move_in_default = st.session_state.get("maintenance_move_in_date", today)
+    gas_default = st.session_state.get("maintenance_gas_due", pd.Timestamp(today) + pd.DateOffset(months=10))
+    eicr_default = st.session_state.get("maintenance_eicr_due", pd.Timestamp(today) + pd.DateOffset(years=4))
+    boiler_default = st.session_state.get("maintenance_boiler_due", pd.Timestamp(today) + pd.DateOffset(months=10))
+    gutter_default = st.session_state.get("maintenance_gutter_due", pd.Timestamp(today) + pd.DateOffset(months=5))
+
+    left_col, right_col = st.columns([1.2, 1])
+
+    with left_col:
+        st.markdown("**Tenancy & Compliance Dates**")
+        tenant_move_in = st.date_input("New tenant move-in date", value=pd.Timestamp(move_in_default).date(), key="maintenance_move_in_date")
+        gas_safety_due = st.date_input("Gas safety due date", value=pd.Timestamp(gas_default).date(), key="maintenance_gas_due")
+        eicr_due = st.date_input("Electrical certificate due date", value=pd.Timestamp(eicr_default).date(), key="maintenance_eicr_due")
+        boiler_service_due = st.date_input("Boiler service due date", value=pd.Timestamp(boiler_default).date(), key="maintenance_boiler_due")
+        gutter_clean_due = st.date_input("Gutter cleaning due date", value=pd.Timestamp(gutter_default).date(), key="maintenance_gutter_due")
+
+    with right_col:
+        st.markdown("**Extra Task**")
+        custom_task_name = st.text_input("Custom task name", placeholder="Example: Legionella review", key="maintenance_custom_task_name")
+        custom_task_due = st.date_input("Custom task due date", value=today, key="maintenance_custom_task_due")
+        custom_task_frequency_months = st.slider(
+            "Custom task repeat cycle (months)",
+            min_value=1,
+            max_value=24,
+            value=12,
+            step=1,
+            key="maintenance_custom_task_frequency",
+        )
+        st.caption("Leave the custom task name blank if you only want the standard schedule.")
+
+    schedule = build_maintenance_schedule(
+        tenant_move_in,
+        gas_safety_due,
+        eicr_due,
+        boiler_service_due,
+        gutter_clean_due,
+        custom_task_name=custom_task_name,
+        custom_task_due=custom_task_due if custom_task_name else None,
+        custom_task_frequency_months=custom_task_frequency_months,
+    )
+
+    overdue_count = int((schedule["Status"] == "Overdue").sum())
+    due_soon_count = int((schedule["Status"] == "Due Soon").sum())
+    upcoming_count = int((schedule["Status"] == "Upcoming").sum())
+    next_due_row = schedule.iloc[0]
+
+    stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+    with stat_col1:
+        st.markdown(
+            build_dashboard_stat_html("Next Due", str(next_due_row["Task"]), str(next_due_row["Due Date"]), "dashboard-badge-watch"),
+            unsafe_allow_html=True,
+        )
+    with stat_col2:
+        st.markdown(
+            build_dashboard_stat_html("Overdue", str(overdue_count), "Needs action now", "dashboard-badge-watch"),
+            unsafe_allow_html=True,
+        )
+    with stat_col3:
+        st.markdown(
+            build_dashboard_stat_html("Due Soon", str(due_soon_count), "Reminder window open", "dashboard-badge-positive" if due_soon_count == 0 else "dashboard-badge-watch"),
+            unsafe_allow_html=True,
+        )
+    with stat_col4:
+        st.markdown(
+            build_dashboard_stat_html("Upcoming", str(upcoming_count), "Planned ahead", "dashboard-badge-positive"),
+            unsafe_allow_html=True,
+        )
+
+    timeline_col, note_col = st.columns([1.25, 0.95])
+    with timeline_col:
+        st.markdown("**Maintenance Timeline**")
+        display_schedule = schedule.copy()
+        display_schedule["Due Date"] = display_schedule["Due Date"].astype(str)
+        display_schedule["Reminder Date"] = display_schedule["Reminder Date"].astype(str)
+        st.dataframe(display_schedule, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download maintenance schedule",
+            data=schedule.to_csv(index=False).encode("utf-8"),
+            file_name="property-maintenance-schedule.csv",
+            mime="text/csv",
+            key="download_maintenance_schedule",
+        )
+
+    with note_col:
+        st.markdown(
+            """
+            <div class="deal-card">
+                <h4>Reminder Notes</h4>
+                <p><strong>Overdue</strong> means the task date has already passed.</p>
+                <p><strong>Due Soon</strong> means the reminder window has opened before the due date.</p>
+                <p><strong>Upcoming</strong> means the task is still outside its reminder window.</p>
+                <p>This tab is a practical landlord checklist for visits, certifications, servicing, and recurring upkeep.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def render_area_intelligence_page():
     st.subheader("Area Intelligence")
 
@@ -2110,6 +2357,9 @@ if page == "Analyse Deal":
 
 elif page == "Area Intelligence":
     render_area_intelligence_page()
+
+elif page == "Property Maintenance":
+    render_property_maintenance_page()
 
 else:
     st.subheader(page)
