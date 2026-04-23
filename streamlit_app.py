@@ -3,6 +3,8 @@ from pathlib import Path
 import re
 from html import escape
 from datetime import date
+import json
+import sqlite3
 
 import pandas as pd
 import requests
@@ -24,6 +26,7 @@ DEAL_TEMPLATE_URL = (
     "Deal%20Stacking%20Template%20-%20PIA.xlsx"
 )
 EPC_API_BASE_URL = "https://api.get-energy-performance-data.communities.gov.uk"
+APP_DB_FILE = "property_os.db"
 
 
 # ============================
@@ -64,6 +67,296 @@ def percent_to_decimal(value):
 
 def safe_percent(numerator, denominator):
     return (numerator / denominator) * 100 if denominator else 0.0
+
+
+def get_db_path():
+    return Path(__file__).resolve().parent / APP_DB_FILE
+
+
+def get_db_connection():
+    connection = sqlite3.connect(get_db_path())
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_database():
+    connection = get_db_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                name TEXT,
+                auth_source TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS properties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT NOT NULL,
+                property_title TEXT NOT NULL,
+                postcode TEXT,
+                street TEXT,
+                notes TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS saved_deals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT NOT NULL,
+                property_title TEXT NOT NULL,
+                postcode TEXT,
+                project_type TEXT,
+                purchase_price REAL,
+                gdv REAL,
+                profit REAL,
+                roi REAL,
+                refurb_total REAL,
+                payload_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS maintenance_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_email TEXT NOT NULL,
+                property_title TEXT NOT NULL,
+                postcode TEXT,
+                move_in_date TEXT,
+                schedule_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def auth_configured():
+    try:
+        return "auth" in st.secrets
+    except Exception:
+        return False
+
+
+def streamlit_user_value(attribute_name):
+    try:
+        if hasattr(st.user, attribute_name):
+            return getattr(st.user, attribute_name)
+    except Exception:
+        pass
+
+    try:
+        return st.user.get(attribute_name)
+    except Exception:
+        return None
+
+
+def get_current_user():
+    try:
+        if getattr(st.user, "is_logged_in", False):
+            email = streamlit_user_value("email")
+            name = streamlit_user_value("name") or email
+            return {
+                "email": email,
+                "name": name,
+                "auth_source": "oidc",
+            }
+    except Exception:
+        pass
+
+    local_email = st.session_state.get("local_user_email", "").strip().lower()
+    local_name = st.session_state.get("local_user_name", "").strip()
+    if local_email:
+        return {
+            "email": local_email,
+            "name": local_name or local_email,
+            "auth_source": "local-prototype",
+        }
+
+    return None
+
+
+def upsert_user(user):
+    if not user or not user.get("email"):
+        return
+
+    connection = get_db_connection()
+    try:
+        connection.execute(
+            """
+            INSERT INTO users (email, name, auth_source)
+            VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+                name = excluded.name,
+                auth_source = excluded.auth_source,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (user["email"], user.get("name"), user.get("auth_source")),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def save_property_record(user, property_title, postcode="", street="", notes=""):
+    if not user or not property_title:
+        return
+
+    connection = get_db_connection()
+    try:
+        connection.execute(
+            """
+            INSERT INTO properties (user_email, property_title, postcode, street, notes)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (user["email"], property_title, postcode, street, notes),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def save_deal_record(user, property_title, postcode, project_type, purchase_price, gdv, profit, roi, refurb_total, payload):
+    if not user or not property_title:
+        return
+
+    connection = get_db_connection()
+    try:
+        connection.execute(
+            """
+            INSERT INTO saved_deals (
+                user_email, property_title, postcode, project_type,
+                purchase_price, gdv, profit, roi, refurb_total, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user["email"],
+                property_title,
+                postcode,
+                project_type,
+                purchase_price,
+                gdv,
+                profit,
+                roi,
+                refurb_total,
+                json.dumps(payload),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def save_maintenance_plan(user, property_title, postcode, move_in_date, schedule_df):
+    if not user or not property_title:
+        return
+
+    connection = get_db_connection()
+    try:
+        connection.execute(
+            """
+            INSERT INTO maintenance_plans (user_email, property_title, postcode, move_in_date, schedule_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                user["email"],
+                property_title,
+                postcode,
+                str(move_in_date),
+                schedule_df.to_json(orient="records", date_format="iso"),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def load_saved_deals(user, limit=12):
+    if not user:
+        return pd.DataFrame()
+
+    connection = get_db_connection()
+    try:
+        return pd.read_sql_query(
+            """
+            SELECT property_title, postcode, project_type, purchase_price, gdv, profit, roi, refurb_total, created_at
+            FROM saved_deals
+            WHERE user_email = ?
+            ORDER BY datetime(created_at) DESC
+            LIMIT ?
+            """,
+            connection,
+            params=(user["email"], limit),
+        )
+    finally:
+        connection.close()
+
+
+def load_saved_properties(user, limit=12):
+    if not user:
+        return pd.DataFrame()
+
+    connection = get_db_connection()
+    try:
+        return pd.read_sql_query(
+            """
+            SELECT property_title, postcode, street, notes, created_at
+            FROM properties
+            WHERE user_email = ?
+            ORDER BY datetime(created_at) DESC
+            LIMIT ?
+            """,
+            connection,
+            params=(user["email"], limit),
+        )
+    finally:
+        connection.close()
+
+
+def render_auth_sidebar():
+    with st.sidebar:
+        st.markdown("**Account**")
+        user = get_current_user()
+
+        if user:
+            st.success(f"Signed in as {user['name']}")
+            st.caption(user["email"])
+            if user.get("auth_source") == "oidc":
+                if st.button("Log out", use_container_width=True, key="logout_button"):
+                    st.logout()
+            else:
+                if st.button("Sign out local profile", use_container_width=True, key="logout_local_button"):
+                    st.session_state.pop("local_user_email", None)
+                    st.session_state.pop("local_user_name", None)
+                    st.rerun()
+            return user
+
+        if auth_configured():
+            st.info("Sign in to load your saved properties, deals, and maintenance plans.")
+            if st.button("Sign in with Google/Microsoft", use_container_width=True, key="login_button"):
+                st.login()
+            return None
+
+        st.warning("Auth is not configured yet, so the app is using a local prototype sign-in.")
+        st.text_input("Name", key="local_user_name", placeholder="Your name")
+        st.text_input("Email", key="local_user_email", placeholder="you@example.com")
+        st.caption("For a proper login later, add Streamlit OIDC auth secrets and Authlib.")
+        return get_current_user()
 
 
 def calculate_banded_tax(amount, bands):
@@ -1811,6 +2104,21 @@ def render_calculator_page():
     else:
         project_outputs, project_details = render_flip_calculator()
 
+    if st.button("Save current project scenario", use_container_width=True, key="save_project_scenario"):
+        save_deal_record(
+            current_user,
+            project_details.get("property_address") or "Saved project scenario",
+            project_details.get("property_reference", ""),
+            project_details.get("project_type", ""),
+            project_details.get("purchase_price", 0),
+            project_outputs.get("gdv", project_details.get("sale_price", 0)),
+            project_outputs.get("equity_created", project_outputs.get("profit", 0)),
+            project_outputs.get("cash_on_cash_roi", project_outputs.get("profit_margin", 0)),
+            project_details.get("refurb_cost", 0),
+            {"project_details": project_details, "project_outputs": project_outputs},
+        )
+        st.success("Project scenario saved to your portfolio.")
+
     template_bytes, template_source = load_calculator_template_bytes()
     with st.expander("Original workbook template"):
         if template_bytes:
@@ -2080,6 +2388,10 @@ def render_property_maintenance_page():
             mime="text/csv",
             key="download_maintenance_schedule",
         )
+        if st.button("Save maintenance plan", use_container_width=True, key="save_maintenance_plan"):
+            plan_property_name = property_name or "Manual maintenance plan"
+            save_maintenance_plan(current_user, plan_property_name, property_postcode, tenant_move_in, schedule)
+            st.success("Maintenance plan saved to your account.")
 
     with note_col:
         st.markdown(
@@ -2094,6 +2406,38 @@ def render_property_maintenance_page():
             """,
             unsafe_allow_html=True,
         )
+
+
+def render_portfolio_page():
+    st.subheader("Portfolio")
+    st.caption("Your saved properties, remembered deals, and reusable project history live here.")
+
+    saved_properties = load_saved_properties(current_user)
+    saved_deals = load_saved_deals(current_user)
+
+    stat_col1, stat_col2 = st.columns(2)
+    stat_col1.metric("Saved properties", int(len(saved_properties)))
+    stat_col2.metric("Saved deals", int(len(saved_deals)))
+
+    property_col, deals_col = st.columns(2)
+
+    with property_col:
+        st.markdown("**Saved Properties**")
+        if saved_properties.empty:
+            st.info("No properties saved yet. Save one from the Analyse Deal page.")
+        else:
+            st.dataframe(saved_properties, use_container_width=True, hide_index=True)
+
+    with deals_col:
+        st.markdown("**Saved Deals**")
+        if saved_deals.empty:
+            st.info("No deals saved yet. Save an analysed deal or project scenario to build your history.")
+        else:
+            display_deals = saved_deals.copy()
+            for field in ("purchase_price", "gdv", "profit", "refurb_total"):
+                display_deals[field] = display_deals[field].apply(lambda value: format_money(value) if pd.notna(value) else "N/A")
+            display_deals["roi"] = display_deals["roi"].apply(lambda value: f"{value:,.1f}%" if pd.notna(value) else "N/A")
+            st.dataframe(display_deals, use_container_width=True, hide_index=True)
 
 
 def render_area_intelligence_page():
@@ -2253,6 +2597,21 @@ def render_area_intelligence_page():
         )
 
 
+initialize_database()
+current_user = render_auth_sidebar()
+
+if current_user:
+    upsert_user(current_user)
+else:
+    st.markdown(
+        """
+        ### Sign in to continue
+        Use the sidebar to sign in and unlock saved properties, previous deals, maintenance plans, and investor materials.
+        """
+    )
+    st.stop()
+
+
 # ============================
 # ANALYSE PAGE
 # ============================
@@ -2343,6 +2702,33 @@ if page == "Analyse Deal":
             st.session_state.target_condition,
         )
 
+        save_col1, save_col2 = st.columns(2)
+        with save_col1:
+            if st.button("Save property to portfolio", use_container_width=True, key="save_property_button"):
+                save_property_record(
+                    current_user,
+                    data.get("name", "Saved property"),
+                    st.session_state.get("selected_postcode", ""),
+                    st.session_state.get("selected_street", ""),
+                    f"Condition: {st.session_state.current_condition} -> {st.session_state.target_condition}",
+                )
+                st.success("Property saved to your portfolio.")
+        with save_col2:
+            if st.button("Save analysed deal", use_container_width=True, key="save_analysed_deal_button"):
+                save_deal_record(
+                    current_user,
+                    data.get("name", "Saved analysed deal"),
+                    st.session_state.get("selected_postcode", ""),
+                    "Analyse Deal",
+                    st.session_state.get("selected_price", 0),
+                    result.get("gdv", 0),
+                    result.get("profit", 0),
+                    result.get("roi", 0),
+                    refurb.get("total", 0),
+                    {"analysis": data, "result": result, "refurb": refurb},
+                )
+                st.success("Analysed deal saved to your portfolio.")
+
     st.divider()
     st.subheader("Project Builder")
     st.caption("Use the analysed deal as the starting point for the full project numbers below.")
@@ -2360,6 +2746,9 @@ elif page == "Area Intelligence":
 
 elif page == "Property Maintenance":
     render_property_maintenance_page()
+
+elif page == "Portfolio":
+    render_portfolio_page()
 
 else:
     st.subheader(page)
