@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 from html import escape
 from datetime import date
+import hashlib
 import json
 import sqlite3
 
@@ -90,6 +91,8 @@ def initialize_database():
                 email TEXT UNIQUE NOT NULL,
                 name TEXT,
                 auth_source TEXT,
+                password_hash TEXT,
+                password_salt TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
@@ -140,6 +143,14 @@ def initialize_database():
             )
             """
         )
+        existing_columns = {
+            row["name"]
+            for row in cursor.execute("PRAGMA table_info(users)").fetchall()
+        }
+        if "password_hash" not in existing_columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+        if "password_salt" not in existing_columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN password_salt TEXT")
         connection.commit()
     finally:
         connection.close()
@@ -178,16 +189,79 @@ def get_current_user():
     except Exception:
         pass
 
-    local_email = st.session_state.get("local_user_email", "").strip().lower()
-    local_name = st.session_state.get("local_user_name", "").strip()
+    local_email = st.session_state.get("authenticated_user_email", "").strip().lower()
+    local_name = st.session_state.get("authenticated_user_name", "").strip()
     if local_email:
         return {
             "email": local_email,
             "name": local_name or local_email,
-            "auth_source": "local-prototype",
+            "auth_source": "local-password",
         }
 
     return None
+
+
+def hash_password(password, salt_hex=None):
+    salt_bytes = bytes.fromhex(salt_hex) if salt_hex else os.urandom(16)
+    password_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt_bytes,
+        200000,
+    ).hex()
+    return password_hash, salt_bytes.hex()
+
+
+def fetch_user_by_email(email):
+    connection = get_db_connection()
+    try:
+        row = connection.execute(
+            "SELECT * FROM users WHERE email = ?",
+            (email.strip().lower(),),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        connection.close()
+
+
+def create_local_user_account(name, email, password):
+    email = email.strip().lower()
+    name = name.strip()
+    if not email or not password:
+        return False, "Email and password are required."
+    if len(password) < 8:
+        return False, "Use at least 8 characters for the password."
+    if fetch_user_by_email(email):
+        return False, "An account with that email already exists."
+
+    password_hash, password_salt = hash_password(password)
+    connection = get_db_connection()
+    try:
+        connection.execute(
+            """
+            INSERT INTO users (email, name, auth_source, password_hash, password_salt)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (email, name or email, "local-password", password_hash, password_salt),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    return True, "Account created. You can now sign in."
+
+
+def verify_local_user_credentials(email, password):
+    email = email.strip().lower()
+    user = fetch_user_by_email(email)
+    if not user:
+        return None
+    if not user.get("password_hash") or not user.get("password_salt"):
+        return None
+
+    candidate_hash, _ = hash_password(password, user["password_salt"])
+    if candidate_hash != user["password_hash"]:
+        return None
+    return user
 
 
 def upsert_user(user):
@@ -334,15 +408,15 @@ def render_auth_sidebar():
         user = get_current_user()
 
         if user:
-            st.success(f"Signed in as {user['name']}")
-            st.caption(user["email"])
+            st.success("Signed in")
+            st.caption(f"Signed in as {user['email']}")
             if user.get("auth_source") == "oidc":
                 if st.button("Log out", use_container_width=True, key="logout_button"):
                     st.logout()
             else:
                 if st.button("Sign out local profile", use_container_width=True, key="logout_local_button"):
-                    st.session_state.pop("local_user_email", None)
-                    st.session_state.pop("local_user_name", None)
+                    st.session_state.pop("authenticated_user_email", None)
+                    st.session_state.pop("authenticated_user_name", None)
                     st.rerun()
             return user
 
@@ -352,10 +426,37 @@ def render_auth_sidebar():
                 st.login()
             return None
 
-        st.warning("Auth is not configured yet, so the app is using a local prototype sign-in.")
-        st.text_input("Name", key="local_user_name", placeholder="Your name")
-        st.text_input("Email", key="local_user_email", placeholder="you@example.com")
-        st.caption("For a proper login later, add Streamlit OIDC auth secrets and Authlib.")
+        st.warning("Using local proof-of-concept login for now. Your account is stored in the app database.")
+        login_tab, create_tab = st.tabs(["Log In", "Create Account"])
+
+        with login_tab:
+            with st.form("local_login_form"):
+                login_email = st.text_input("Email", key="login_email", placeholder="you@example.com")
+                login_password = st.text_input("Password", type="password", key="login_password")
+                login_submitted = st.form_submit_button("Log in", use_container_width=True)
+            if login_submitted:
+                matched_user = verify_local_user_credentials(login_email, login_password)
+                if matched_user:
+                    st.session_state.authenticated_user_email = matched_user["email"]
+                    st.session_state.authenticated_user_name = matched_user.get("name") or matched_user["email"]
+                    st.rerun()
+                else:
+                    st.error("Email or password was incorrect.")
+
+        with create_tab:
+            with st.form("local_create_account_form"):
+                create_name = st.text_input("Name", key="create_name", placeholder="Your name")
+                create_email = st.text_input("Email", key="create_email", placeholder="you@example.com")
+                create_password = st.text_input("Password", type="password", key="create_password")
+                create_submitted = st.form_submit_button("Create account", use_container_width=True)
+            if create_submitted:
+                created, message = create_local_user_account(create_name, create_email, create_password)
+                if created:
+                    st.success(message)
+                else:
+                    st.error(message)
+
+        st.caption("Later, we can swap this to Google login without changing the rest of your saved data features.")
         return get_current_user()
 
 
