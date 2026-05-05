@@ -70,6 +70,12 @@ def safe_percent(numerator, denominator):
     return (numerator / denominator) * 100 if denominator else 0.0
 
 
+def bridge_basis_value(inputs):
+    if inputs.get("bridge_valuation_basis") == "Current market value":
+        return float(inputs.get("current_market_value", 0) or 0)
+    return float(inputs.get("purchase_price", 0) or 0)
+
+
 def get_db_path():
     return Path(__file__).resolve().parent / APP_DB_FILE
 
@@ -492,11 +498,23 @@ def calculate_template_sdlt(price, property_type):
     return calculate_banded_tax(price, bands)
 
 
+def format_breakdown_value(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        kind = value.get("kind", "money")
+        raw_value = value.get("value", 0)
+        if kind == "percent":
+            return format_percent(raw_value)
+        return format_money(raw_value)
+    return format_money(value)
+
+
 def render_breakdown_table(title, items):
     table = pd.DataFrame(
         {
             "Line Item": list(items.keys()),
-            "Amount": [format_money(v) for v in items.values()],
+            "Amount": [format_breakdown_value(v) for v in items.values()],
         }
     )
     st.markdown(f"**{title}**")
@@ -1486,16 +1504,18 @@ def analyse(price, sqm, ppsqm, refurb_total):
 # ============================
 def calculate_brr_scenario(inputs):
     purchase_price = inputs["purchase_price"]
-    bridge_pct = percent_to_decimal(inputs["bridge_funding_pct"])
+    bridge_ltv = percent_to_decimal(inputs["bridge_ltv_pct"])
     bridge_rate = percent_to_decimal(inputs["bridge_monthly_rate"])
     refi_ltv = percent_to_decimal(inputs["refi_ltv"])
     mortgage_rate = percent_to_decimal(inputs["mortgage_interest_rate"])
+    current_market_value = inputs["current_market_value"]
+    bridge_security_value = bridge_basis_value(inputs)
 
     sdlt = calculate_template_sdlt(purchase_price, inputs["property_type"])
     purchase_costs = sdlt + inputs["auction_fees"] + inputs["valuation_fees"] + inputs["purchase_legal_fees"]
     development_costs = inputs["refurb_cost"] + inputs["planning_cost"] + inputs["holding_cost"]
 
-    gross_bridge = purchase_price * bridge_pct
+    gross_bridge = bridge_security_value * bridge_ltv
     bridge_arrangement_fee = gross_bridge * percent_to_decimal(inputs["arrangement_fee_pct"])
     bridge_broker_fee = gross_bridge * percent_to_decimal(inputs["bridge_broker_fee_pct"])
     bridging_interest = gross_bridge * bridge_rate * inputs["bridge_months"]
@@ -1505,7 +1525,9 @@ def calculate_brr_scenario(inputs):
 
     refinance_proceeds = inputs["gdv"] * refi_ltv
     annual_rent = inputs["monthly_rent"] * 12
-    annual_mortgage_cost = refinance_proceeds * mortgage_rate
+    mortgage_arrangement_fee = refinance_proceeds * percent_to_decimal(inputs["mortgage_arrangement_fee_pct"])
+    mortgage_balance_for_interest = refinance_proceeds + mortgage_arrangement_fee
+    annual_mortgage_cost = mortgage_balance_for_interest * mortgage_rate
 
     project_costs = (
         purchase_price
@@ -1525,15 +1547,23 @@ def calculate_brr_scenario(inputs):
 
     return {
         "sdlt": sdlt,
+        "gdv": inputs["gdv"],
+        "current_market_value": current_market_value,
         "purchase_costs": purchase_costs,
         "development_costs": development_costs,
+        "bridge_security_value": bridge_security_value,
+        "bridge_ltv_pct": inputs["bridge_ltv_pct"],
+        "bridge_day_one_pct_of_purchase": safe_percent(gross_bridge, purchase_price),
         "gross_bridge": gross_bridge,
         "net_bridge": advance_received,
         "bridging_interest": bridging_interest,
         "bridge_arrangement_fee": bridge_arrangement_fee,
         "bridge_broker_fee": bridge_broker_fee,
+        "mortgage_arrangement_fee": mortgage_arrangement_fee,
+        "mortgage_balance_for_interest": mortgage_balance_for_interest,
         "project_costs": project_costs,
         "cash_required": cash_required,
+        "cash_required_before_funding": project_costs,
         "refinance_proceeds": refinance_proceeds,
         "cash_left_in_deal": cash_left_in_deal,
         "annual_rent": annual_rent,
@@ -1547,14 +1577,16 @@ def calculate_brr_scenario(inputs):
 
 def calculate_flip_scenario(inputs):
     purchase_price = inputs["purchase_price"]
-    bridge_pct = percent_to_decimal(inputs["bridge_funding_pct"])
+    bridge_ltv = percent_to_decimal(inputs["bridge_ltv_pct"])
     bridge_rate = percent_to_decimal(inputs["bridge_monthly_rate"])
+    current_market_value = inputs["current_market_value"]
+    bridge_security_value = bridge_basis_value(inputs)
 
     sdlt = calculate_template_sdlt(purchase_price, inputs["property_type"])
     purchase_costs = sdlt + inputs["auction_fees"] + inputs["valuation_fees"] + inputs["purchase_legal_fees"]
     development_costs = inputs["refurb_cost"] + inputs["planning_cost"] + inputs["holding_cost"]
 
-    gross_bridge = purchase_price * bridge_pct
+    gross_bridge = bridge_security_value * bridge_ltv
     bridge_arrangement_fee = gross_bridge * percent_to_decimal(inputs["arrangement_fee_pct"])
     bridge_broker_fee = gross_bridge * percent_to_decimal(inputs["bridge_broker_fee_pct"])
     bridging_interest = gross_bridge * bridge_rate * inputs["bridge_months"]
@@ -1575,13 +1607,18 @@ def calculate_flip_scenario(inputs):
     )
 
     total_costs_with_sale = project_costs + agent_fees + inputs["sale_legal_fees"]
-    cash_required = total_costs_with_sale - advance_received
+    cash_required = project_costs - advance_received
     profit = net_sale_proceeds - project_costs
 
     return {
         "sdlt": sdlt,
+        "sale_price": inputs["sale_price"],
+        "current_market_value": current_market_value,
         "purchase_costs": purchase_costs,
         "development_costs": development_costs,
+        "bridge_security_value": bridge_security_value,
+        "bridge_ltv_pct": inputs["bridge_ltv_pct"],
+        "bridge_day_one_pct_of_purchase": safe_percent(gross_bridge, purchase_price),
         "gross_bridge": gross_bridge,
         "net_bridge": advance_received,
         "bridging_interest": bridging_interest,
@@ -1591,6 +1628,7 @@ def calculate_flip_scenario(inputs):
         "project_costs": project_costs,
         "total_costs_with_sale": total_costs_with_sale,
         "cash_required": cash_required,
+        "cash_required_before_funding": project_costs,
         "net_sale_proceeds": net_sale_proceeds,
         "profit": profit,
         "profit_on_cash": safe_percent(profit, cash_required),
@@ -1629,15 +1667,29 @@ def render_brr_calculator():
             step=5000,
             key="brr_gdv",
         )
+        current_market_value = st.number_input(
+            "Current market value",
+            min_value=0,
+            value=110000,
+            step=5000,
+            key="brr_current_market_value",
+            help="Use this when the day-one valuation is different from the agreed purchase price.",
+        )
 
         st.markdown("**Bridge & Exit**")
-        bridge_funding_pct = st.slider(
-            "% of purchase funded with bridge",
+        bridge_valuation_basis = st.radio(
+            "Bridge leverage based on",
+            ["Purchase price", "Current market value"],
+            horizontal=True,
+            key="brr_bridge_valuation_basis",
+        )
+        bridge_ltv_pct = st.slider(
+            "Bridge loan to value %",
             min_value=0,
             max_value=100,
             value=75,
             step=1,
-            key="brr_bridge_funding_pct",
+            key="brr_bridge_ltv_pct",
         )
         bridge_monthly_rate = st.slider(
             "Monthly bridge interest %",
@@ -1690,6 +1742,19 @@ def render_brr_calculator():
             step=0.1,
             key="brr_bridge_broker_fee_pct",
         )
+        mortgage_arrangement_fee_pct = st.slider(
+            "Mortgage arrangement fee %",
+            min_value=0.0,
+            max_value=5.0,
+            value=2.0,
+            step=0.1,
+            key="brr_mortgage_arrangement_fee_pct",
+            help="This is added onto the mortgage balance for the annual interest calculation.",
+        )
+        st.caption(
+            f"Bridge sizing is currently based on {bridge_valuation_basis.lower()} at "
+            f"{format_percent(bridge_ltv_pct)}."
+        )
 
         st.markdown("**Works & Fees**")
         cost_col_a, cost_col_b, cost_col_c = st.columns(3)
@@ -1741,14 +1806,17 @@ def render_brr_calculator():
             "property_address": property_address,
             "property_reference": property_reference,
             "purchase_price": purchase_price,
+            "current_market_value": current_market_value,
             "gdv": gdv,
-            "bridge_funding_pct": bridge_funding_pct,
+            "bridge_valuation_basis": bridge_valuation_basis,
+            "bridge_ltv_pct": bridge_ltv_pct,
             "bridge_monthly_rate": bridge_monthly_rate,
             "bridge_months": bridge_months,
             "retain_fees": retain_fees,
             "refi_ltv": refi_ltv,
             "mortgage_interest_rate": mortgage_interest_rate,
             "arrangement_fee_pct": arrangement_fee_pct,
+            "mortgage_arrangement_fee_pct": mortgage_arrangement_fee_pct,
             "bridge_broker_fee_pct": bridge_broker_fee_pct,
             "refurb_cost": refurb_cost,
             "planning_cost": planning_cost,
@@ -1785,6 +1853,8 @@ def render_brr_calculator():
         render_breakdown_table(
             "Finance Breakdown",
             {
+                "Bridge basis value": brr_outputs["bridge_security_value"],
+                "Bridge day-one leverage vs purchase": {"kind": "percent", "value": brr_outputs["bridge_day_one_pct_of_purchase"]},
                 "Gross bridge": brr_outputs["gross_bridge"],
                 "Net bridge received": brr_outputs["net_bridge"],
                 "Bridge interest": brr_outputs["bridging_interest"],
@@ -1793,30 +1863,59 @@ def render_brr_calculator():
             },
         )
         render_breakdown_table(
-            "Project Breakdown",
+            "Purchase Cost Breakdown",
             {
+                "Stamp duty": brr_outputs["sdlt"],
+                "Auction fees": auction_fees,
+                "Valuation fees": valuation_fees,
+                "Purchase legals": purchase_legal_fees,
+                "Purchase costs": brr_outputs["purchase_costs"],
+            },
+        )
+        render_breakdown_table(
+            "Refinance Cost Breakdown",
+            {
+                "Refi legals": refi_legal_fees,
+                "Refi broker fees": refi_broker_fees,
+                "Mortgage arrangement fee": brr_outputs["mortgage_arrangement_fee"],
+                "Mortgage balance for interest": brr_outputs["mortgage_balance_for_interest"],
+                "Annual mortgage cost": brr_outputs["annual_mortgage_cost"],
+            },
+        )
+        render_breakdown_table(
+            "Cash Required Breakdown",
+            {
+                "Purchase price": purchase_price,
                 "Purchase costs": brr_outputs["purchase_costs"],
                 "Development costs": brr_outputs["development_costs"],
-                "Project costs": brr_outputs["project_costs"],
+                "Bridge arrangement fee": brr_outputs["bridge_arrangement_fee"],
+                "Bridge broker fee": brr_outputs["bridge_broker_fee"],
+                "Bridge interest": brr_outputs["bridging_interest"],
+                "Refi legals": refi_legal_fees,
+                "Refi broker fees": refi_broker_fees,
+                "Total project cash in": brr_outputs["cash_required_before_funding"],
+                "Less net bridge received": -brr_outputs["net_bridge"],
+                "Total cash required": brr_outputs["cash_required"],
                 "Annual rent": brr_outputs["annual_rent"],
-                "Annual mortgage cost": brr_outputs["annual_mortgage_cost"],
             },
         )
 
     st.caption(
-        "SDLT follows the banding shown in your original template, so the calculator stays aligned with your deal stacker workbook."
+        "SDLT is included inside purchase costs and is now shown line by line so the total cash requirement is easier to follow."
     )
     return brr_outputs, {
         "project_type": "BRR",
         "property_address": property_address,
         "property_reference": property_reference,
         "purchase_price": purchase_price,
+        "current_market_value": current_market_value,
         "gdv": gdv,
         "refurb_cost": refurb_cost,
         "holding_cost": holding_cost,
         "planning_cost": planning_cost,
         "bridge_months": bridge_months,
-        "bridge_funding_pct": bridge_funding_pct,
+        "bridge_valuation_basis": bridge_valuation_basis,
+        "bridge_ltv_pct": bridge_ltv_pct,
         "monthly_rent": monthly_rent,
     }
 
@@ -1852,15 +1951,29 @@ def render_flip_calculator():
             step=5000,
             key="flip_sale_price",
         )
+        current_market_value = st.number_input(
+            "Current market value",
+            min_value=0,
+            value=125000,
+            step=5000,
+            key="flip_current_market_value",
+            help="Use this when the bridge lender is underwriting the day-one market value rather than the purchase price.",
+        )
 
         st.markdown("**Bridge**")
-        bridge_funding_pct = st.slider(
-            "% of purchase funded with bridge",
+        bridge_valuation_basis = st.radio(
+            "Bridge leverage based on",
+            ["Purchase price", "Current market value"],
+            horizontal=True,
+            key="flip_bridge_valuation_basis",
+        )
+        bridge_ltv_pct = st.slider(
+            "Bridge loan to value %",
             min_value=0,
             max_value=100,
             value=75,
             step=1,
-            key="flip_bridge_funding_pct",
+            key="flip_bridge_ltv_pct",
         )
         bridge_monthly_rate = st.slider(
             "Monthly bridge interest %",
@@ -1896,6 +2009,10 @@ def render_flip_calculator():
             value=1.5,
             step=0.1,
             key="flip_bridge_broker_fee_pct",
+        )
+        st.caption(
+            f"Bridge sizing is currently based on {bridge_valuation_basis.lower()} at "
+            f"{format_percent(bridge_ltv_pct)}."
         )
 
         st.markdown("**Works & Costs**")
@@ -1939,8 +2056,10 @@ def render_flip_calculator():
             "property_address": property_address,
             "property_reference": property_reference,
             "purchase_price": purchase_price,
+            "current_market_value": current_market_value,
             "sale_price": sale_price,
-            "bridge_funding_pct": bridge_funding_pct,
+            "bridge_valuation_basis": bridge_valuation_basis,
+            "bridge_ltv_pct": bridge_ltv_pct,
             "bridge_monthly_rate": bridge_monthly_rate,
             "bridge_months": bridge_months,
             "retain_fees": retain_fees,
@@ -1976,6 +2095,8 @@ def render_flip_calculator():
             "Finance Breakdown",
             {
                 "Stamp duty": flip_outputs["sdlt"],
+                "Bridge basis value": flip_outputs["bridge_security_value"],
+                "Bridge day-one leverage vs purchase": {"kind": "percent", "value": flip_outputs["bridge_day_one_pct_of_purchase"]},
                 "Gross bridge": flip_outputs["gross_bridge"],
                 "Net bridge received": flip_outputs["net_bridge"],
                 "Bridge interest": flip_outputs["bridging_interest"],
@@ -1984,31 +2105,55 @@ def render_flip_calculator():
             },
         )
         render_breakdown_table(
-            "Project Breakdown",
+            "Purchase Cost Breakdown",
             {
+                "Stamp duty": flip_outputs["sdlt"],
+                "Auction fees": auction_fees,
+                "Valuation fees": valuation_fees,
+                "Purchase legals": purchase_legal_fees,
+                "Purchase costs": flip_outputs["purchase_costs"],
+            },
+        )
+        render_breakdown_table(
+            "Cash Required Breakdown",
+            {
+                "Purchase price": purchase_price,
                 "Purchase costs": flip_outputs["purchase_costs"],
                 "Development costs": flip_outputs["development_costs"],
+                "Bridge arrangement fee": flip_outputs["bridge_arrangement_fee"],
+                "Bridge broker fee": flip_outputs["bridge_broker_fee"],
+                "Bridge interest": flip_outputs["bridging_interest"],
+                "Total project cash in": flip_outputs["cash_required_before_funding"],
+                "Less net bridge received": -flip_outputs["net_bridge"],
+                "Total cash required": flip_outputs["cash_required"],
+            },
+        )
+        render_breakdown_table(
+            "Exit Breakdown",
+            {
                 "Agent fees": flip_outputs["agent_fees"],
-                "Project costs before sale": flip_outputs["project_costs"],
+                "Sale legals": sale_legal_fees,
                 "Total costs incl. sale": flip_outputs["total_costs_with_sale"],
                 "Net sale proceeds": flip_outputs["net_sale_proceeds"],
             },
         )
 
     st.caption(
-        "This mirrors the workbook as a deal-first UI: sliders for leverage and fees, then live outputs for profit, margin, and cash required."
+        "The cash required figure now shows the upfront capital needed before sale, while the exit breakdown keeps sale fees and proceeds separate."
     )
     return flip_outputs, {
         "project_type": "Flip",
         "property_address": property_address,
         "property_reference": property_reference,
         "purchase_price": purchase_price,
+        "current_market_value": current_market_value,
         "sale_price": sale_price,
         "refurb_cost": refurb_cost,
         "holding_cost": holding_cost,
         "planning_cost": planning_cost,
         "bridge_months": bridge_months,
-        "bridge_funding_pct": bridge_funding_pct,
+        "bridge_valuation_basis": bridge_valuation_basis,
+        "bridge_ltv_pct": bridge_ltv_pct,
     }
 
 
@@ -2043,11 +2188,13 @@ def seed_project_type_defaults():
         "brr_property_address": selected_name,
         "brr_property_reference": selected_postcode,
         "brr_purchase_price": int(selected_price),
+        "brr_current_market_value": int(selected_price),
         "brr_gdv": int(gdv),
         "brr_refurb_cost": refurb_total,
         "flip_property_address": selected_name,
         "flip_property_reference": selected_postcode,
         "flip_purchase_price": int(selected_price),
+        "flip_current_market_value": int(selected_price),
         "flip_sale_price": int(gdv),
         "flip_refurb_cost": refurb_total,
     }
@@ -2062,8 +2209,10 @@ def build_investor_pack(project_details, project_outputs, investor_inputs, analy
     property_name = project_details.get("property_address") or "Selected property"
     project_type = project_details.get("project_type", "Project")
     purchase_price = project_details.get("purchase_price", 0)
+    current_market_value = project_details.get("current_market_value", purchase_price)
     refurb_cost = project_details.get("refurb_cost", 0)
     available_cash = investor_inputs.get("available_cash", 0)
+    available_security = investor_inputs.get("available_security", 0)
     investor_required = investor_inputs.get("investor_required", 0)
     target_return = investor_inputs.get("target_return_pct", 0)
     proposed_share = investor_inputs.get("profit_share_pct", 0)
@@ -2081,6 +2230,7 @@ def build_investor_pack(project_details, project_outputs, investor_inputs, analy
 - Property: {summary_line}
 - Project Type: {project_type}
 - Purchase Price: {format_money(purchase_price)}
+- Current Market Value: {format_money(current_market_value)}
 - Refurb Budget: {format_money(refurb_cost)}
 - Headline Exit Value: {format_money(headline_value)}
 - Forecast Profit / Equity Uplift: {format_money(headline_profit)}
@@ -2088,6 +2238,7 @@ def build_investor_pack(project_details, project_outputs, investor_inputs, analy
 ## Capital Stack
 - Total Cash Required: {format_money(project_outputs.get('cash_required', 0))}
 - Operator Cash Going In: {format_money(available_cash)}
+- Equity / Security Support: {format_money(available_security)}
 - Investor Funds Required: {format_money(investor_required)}
 - Proposed Investor Target Return: {target_return:.1f}%
 - Proposed Investor Profit Share: {proposed_share:.1f}%
@@ -2101,8 +2252,10 @@ def build_investor_pack(project_details, project_outputs, investor_inputs, analy
 - Stamp Duty / Entry Tax: {format_money(project_outputs.get('sdlt', 0))}
 - Purchase Costs: {format_money(project_outputs.get('purchase_costs', 0))}
 - Development Costs: {format_money(project_outputs.get('development_costs', 0))}
+- Bridge Basis Value: {format_money(project_outputs.get('bridge_security_value', 0))}
 - Gross Bridge: {format_money(project_outputs.get('gross_bridge', 0))}
 - Bridge Interest: {format_money(project_outputs.get('bridging_interest', 0))}
+- Mortgage Arrangement Fee: {format_money(project_outputs.get('mortgage_arrangement_fee', 0))}
 
 ## Exit View
 """
@@ -2143,6 +2296,7 @@ def build_investor_email(project_details, project_outputs, investor_inputs, anal
     property_name = project_details.get("property_address") or "this deal"
     project_type = project_details.get("project_type", "project")
     investor_required = investor_inputs.get("investor_required", 0)
+    available_security = investor_inputs.get("available_security", 0)
     headline_profit = project_outputs.get("equity_created")
     if headline_profit is None:
         headline_profit = project_outputs.get("profit", 0)
@@ -2155,9 +2309,9 @@ Hi [Investor Name],
 
 I hope you're well. I have a new {project_type.lower()} opportunity that I think could be a strong fit for you.
 
-The deal is centred on {summary_line}. The purchase price is {format_money(project_details.get('purchase_price', 0))} with a refurb budget of {format_money(project_details.get('refurb_cost', 0))}. Based on the current underwriting, the projected upside is around {format_money(headline_profit)}.
+The deal is centred on {summary_line}. The purchase price is {format_money(project_details.get('purchase_price', 0))} with a current market value of {format_money(project_details.get('current_market_value', project_details.get('purchase_price', 0)))} and a refurb budget of {format_money(project_details.get('refurb_cost', 0))}. Based on the current underwriting, the projected upside is around {format_money(headline_profit)}.
 
-I'm looking to raise {format_money(investor_required)} to complete the capital stack. I am putting in {format_money(investor_inputs.get('available_cash', 0))} personally, and I can share the full investor pack with the entry costs, works budget, finance assumptions, and exit numbers.
+I'm looking to raise {format_money(investor_required)} to complete the capital stack. I am putting in {format_money(investor_inputs.get('available_cash', 0))} personally and can also support the deal with {format_money(available_security)} in available equity / security, and I can share the full investor pack with the entry costs, works budget, finance assumptions, and exit numbers.
 
 If you're open to it, I'd love to send the pack over and talk you through the project this week.
 
@@ -2238,7 +2392,7 @@ def render_calculator_page():
 
 def render_investor_funding_section(project_outputs, project_details, analysis_data=None):
     st.subheader("Funding & Investor Raise")
-    st.caption("Track how much cash you already have, identify any funding gap, and generate investor-ready material when outside capital is needed.")
+    st.caption("Track how much cash and security you already have, identify any funding gap, and generate investor-ready material when outside capital is needed.")
 
     cash_required = max(float(project_outputs.get("cash_required", 0)), 0.0)
 
@@ -2252,21 +2406,30 @@ def render_investor_funding_section(project_outputs, project_details, analysis_d
             step=5000,
             key="available_cash_to_invest",
         )
+        available_security = st.number_input(
+            "Available equity / security you can leverage",
+            min_value=0,
+            value=0,
+            step=5000,
+            key="available_security_support",
+            help="Use this for equity you could put up as additional security, for example from another property or your own home.",
+        )
         use_investor_funds = st.toggle(
             "Use investor funds for this project",
-            value=cash_required > available_cash,
+            value=cash_required > (available_cash + available_security),
             key="use_investor_funds",
         )
 
-    investor_required = max(cash_required - available_cash, 0.0) if use_investor_funds else 0.0
+    investor_required = max(cash_required - available_cash - available_security, 0.0) if use_investor_funds else 0.0
 
     with investor_col:
         st.metric("Total cash required", format_money(cash_required))
         st.metric("Your cash", format_money(available_cash))
+        st.metric("Security support", format_money(available_security))
         st.metric("Investor funds needed", format_money(investor_required))
 
     if not use_investor_funds or investor_required <= 0:
-        st.success("This project is fully covered by your own cash based on the current assumptions.")
+        st.success("This project is fully covered by your current cash and available security based on the current assumptions.")
         return
 
     terms_col_a, terms_col_b, terms_col_c = st.columns(3)
@@ -2294,6 +2457,7 @@ def render_investor_funding_section(project_outputs, project_details, analysis_d
 
     investor_inputs = {
         "available_cash": available_cash,
+        "available_security": available_security,
         "investor_required": investor_required,
         "target_return_pct": target_return_pct,
         "profit_share_pct": profit_share_pct,
